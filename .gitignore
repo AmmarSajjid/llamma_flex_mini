@@ -1,5 +1,9 @@
 .venv
+__pycache__
+
+data
 models
 
 modeling_qwen2.py
 exp.ipynb
+
