@@ -2,14 +2,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 
 
-
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B", dtype="auto")
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+# Load the model from saved
+loaded_model = AutoModelForCausalLM.from_pretrained("./models/qwen_model")
+loaded_tokenizer = AutoTokenizer.from_pretrained("./models/qwen_tokenizer")
 
 text = "The quick brown fox "
-inputs = tokenizer(text, return_tensors="pt")
+inputs = loaded_tokenizer(text, return_tensors="pt")
 
-outputs = model(**inputs)
-out_text = tokenizer.decode(outputs.logits.argmax(dim=-1)[0])
+outputs = loaded_model(**inputs)
+out_text = loaded_tokenizer.decode(outputs.logits.argmax(dim=-1)[0])
 
 print("Qwen Model: " + out_text)
+
