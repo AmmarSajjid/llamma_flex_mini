@@ -101,7 +101,7 @@ def evaluate(model, tokenized_ds, tokenizer):
 def main():
     print(f"Using device: {DEVICE}")
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL_PATH)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_PATH).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
 
     if tokenizer.pad_token is None:
