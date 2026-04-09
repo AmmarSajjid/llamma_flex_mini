@@ -137,7 +137,7 @@ def main():
 
     ds = load_from_disk(SUBSET_DIR)
     text_col = 'text'
-    tokenized_ds = tokenize_dataset(ds, tokenizer, text_col)
+    tokenized_ds = tokenize_dataset(ds, tokenizer, MAX_LENGTH)
 
     print(f"Loaded {len(ds)} raw examples")
     print(f"Tokenized into {len(tokenized_ds)} usable examples")
