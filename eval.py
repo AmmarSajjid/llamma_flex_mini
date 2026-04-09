@@ -85,7 +85,8 @@ def evaluate(model, tokenized_ds, tokenizer):
         total_nll += loss.item() * valid_tokens
         total_pred_tokens += valid_tokens
 
-        print(f"Batch {b} completed")
+        # print(f"Batch {b} completed")
+        b += 1
 
     avg_loss = total_nll / total_pred_tokens
     perplexity = math.exp(avg_loss)
