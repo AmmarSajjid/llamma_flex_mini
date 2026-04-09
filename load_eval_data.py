@@ -53,6 +53,7 @@ def get_or_create_debug_subset():
 def main():
     print(f"Using device: {DEVICE}")
     ds = get_or_create_debug_subset()
+    print(f"Subset size: {len(ds)} examples")
     
 
 

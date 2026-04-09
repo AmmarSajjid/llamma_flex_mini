@@ -24,7 +24,7 @@ MODEL_PATH = f"{PROJECT_ROOT}/models/qwen_model"
 TOKENIZER_PATH = f"{PROJECT_ROOT}/models/qwen_tokenizer"
 
 MAX_LENGTH = 512
-BATCH_SIZE = 2
+BATCH_SIZE = 16
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEXT_COL = "text"
 
