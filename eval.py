@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from helper_functions.helper_functions import tokenize_dataset, collate_batch
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 SUBSET_DIR = "./data/debug_fineweb_subset"
@@ -30,27 +31,27 @@ def tokenize_dataset(ds, tokenizer, max_length=MAX_LENGTH):
 
 
 #Feature is just a batch before collating
-def collate_batch(features, pad_token_id):
-    max_len = max(len(f["input_ids"]) for f in features)
+# def collate_batch(features, pad_token_id):
+#     max_len = max(len(f["input_ids"]) for f in features)
 
-    input_ids = []
-    attention_mask = []
-    labels = []
+#     input_ids = []
+#     attention_mask = []
+#     labels = []
 
-    for f in features:
-        ids = f["input_ids"]
-        mask = [1] * len(ids)
-        pad_len = max_len - len(ids)
+#     for f in features:
+#         ids = f["input_ids"]
+#         mask = [1] * len(ids)
+#         pad_len = max_len - len(ids)
 
-        input_ids.append(ids + [pad_token_id] * pad_len)
-        attention_mask.append(mask + [0] * pad_len)
-        labels.append(ids + [-100] * pad_len)
+#         input_ids.append(ids + [pad_token_id] * pad_len)
+#         attention_mask.append(mask + [0] * pad_len)
+#         labels.append(ids + [-100] * pad_len)
 
-    return {
-        "input_ids": torch.tensor(input_ids, dtype=torch.long),
-        "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-        "labels": torch.tensor(labels, dtype=torch.long),
-    }
+#     return {
+#         "input_ids": torch.tensor(input_ids, dtype=torch.long),
+#         "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+#         "labels": torch.tensor(labels, dtype=torch.long),
+#     }
 
 
 @torch.no_grad()
