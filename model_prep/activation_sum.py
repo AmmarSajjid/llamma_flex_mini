@@ -17,7 +17,7 @@ from helper_functions.helper_functions import tokenize_dataset, collate_batch
 
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
-SUBSET_DIR = f"{PROJECT_ROOT}/data/debug_fineweb_subset"
+SUBSET_DIR = f"{PROJECT_ROOT}/data/micro_fineweb_subset"
 SAVE_PATH = f"{PROJECT_ROOT}/mlp_activation_sums.pt"
 
 MODEL_PATH = f"{PROJECT_ROOT}/models/qwen_model"
