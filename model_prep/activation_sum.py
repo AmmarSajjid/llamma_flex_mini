@@ -2,14 +2,19 @@
 Running the Qwen Model on a small subset of the HuggingFace "fineweb-edu" dataset to get the running sum of the activations of the MLP layers
 intermediate state, and using it to generate rankings.
 '''
+import sys
 import os
 from pathlib import Path
-
 import torch
 import torch.nn.functional as F
 from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
+
 from helper_functions.helper_functions import tokenize_dataset, collate_batch
+
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 SUBSET_DIR = "./debug_fineweb_subset"
