@@ -6,14 +6,11 @@ from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from helper_functions.helper_functions import tokenize_dataset, collate_batch
 
-MODEL_NAME = "Qwen/Qwen2.5-0.5B"
-SUBSET_DIR = "./data/debug_fineweb_subset"
-MAX_LENGTH = 512
-BATCH_SIZE = 4
-MODEL_PATH = "./models/qwen_model"
-TOKENIZER_PATH = "./models/qwen_tokenizer"
+from config import SUBSET_DIR, MAX_LENGTH, BATCH_SIZE, MODEL_PATH, TOKENIZER_PATH
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DATA_DIR = SUBSET_DIR
 
 
 def tokenize_dataset(ds, tokenizer, max_length=MAX_LENGTH):

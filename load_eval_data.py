@@ -13,11 +13,10 @@ Creating/Loading a debug subset of the HuggingFace "fineweb-edu" dataset for qui
 # Config
 # ----------------------------
 DATASET_NAME = "HuggingFaceFW/fineweb-edu"
-DATASET_SPLIT = "train"          # change if needed
-SUBSET_SIZE = 100000                # number of documents for debug
+DATASET_SPLIT = "train"
+SUBSET_SIZE = 100000                
 SEED = 42
 SUBSET_DIR = f"data/micro_fineweb_subset"
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 

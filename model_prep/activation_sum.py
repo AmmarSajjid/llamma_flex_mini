@@ -14,17 +14,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 
 from helper_functions.helper_functions import tokenize_dataset, collate_batch
+from config import MODEL_NAME, SUBSET_DIR, MODEL_PATH, TOKENIZER_PATH, MAX_LENGTH, BATCH_SIZE
 
-
-MODEL_NAME = "Qwen/Qwen2.5-0.5B"
-SUBSET_DIR = f"{PROJECT_ROOT}/data/micro_fineweb_subset"
 SAVE_PATH = f"{PROJECT_ROOT}/mlp_activation_sums.pt"
-
-MODEL_PATH = f"{PROJECT_ROOT}/models/qwen_model"
-TOKENIZER_PATH = f"{PROJECT_ROOT}/models/qwen_tokenizer"
-
-MAX_LENGTH = 512
-BATCH_SIZE = 16
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TEXT_COL = "text"
 

@@ -6,7 +6,9 @@ from transformers import AutoModelForCausalLM
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
-MODEL_PATH = f"{PROJECT_ROOT}/models/qwen_model"
+
+from config import MODEL_PATH
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
