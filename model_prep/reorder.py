@@ -24,7 +24,7 @@ def get_placement(activation_sums, layer):
 
 def get_projection_matrix(order):
     dim = len(order)
-    P = torch.zeros((dim, dim), device=DEVICE, dtype=torch.float32)
+    P = torch.zeros((dim, dim), device=DEVICE, dtype=torch.bfloat16)
     for old_idx, new_pos in enumerate(order):
         P[new_pos - 1, old_idx] = 1
     return P
