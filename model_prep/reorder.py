@@ -46,7 +46,7 @@ def reorder_layer(layer, P):
 if __name__ == "__main__":
     save_path = f"{PROJECT_ROOT}/models/qwen_model_reordered_mlp_100k"
     model = AutoModelForCausalLM.from_pretrained(MODEL_PATH).to(DEVICE)
-    activation_sums = torch.load(f"{PROJECT_ROOT}/mlp_activation_sums.pt", map_location=DEVICE)
+    activation_sums = torch.load(f"{PROJECT_ROOT}/mlp_activation_sums.pt", map_location=DEVICE)['activation_sums']
 
     num_layers = len(model.model.layers)
     for l in range(num_layers):
