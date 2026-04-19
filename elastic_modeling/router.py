@@ -12,15 +12,14 @@ class BudgetRouter(nn.Module):
         self.num_layers = num_layers
         self.d_choices = list(d_choices)
 
-        # Phase 1 routes one MLP width choice and one keep/skip choice per layer.
-        self.router_d = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.num_budgets, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, len(self.d_choices)),
-            )
-            for _ in range(num_layers)
-        ])
+        # Phase 1 uses one global MLP-width router shared by every layer. This
+        # keeps the elastic stack more uniform, while layer skipping remains
+        # per-layer.
+        self.router_d = nn.Sequential(
+            nn.Linear(self.num_budgets, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, len(self.d_choices)),
+        )
 
         self.router_lambda = nn.ModuleList([
             nn.Sequential(
@@ -42,7 +41,8 @@ class BudgetRouter(nn.Module):
 
         h = self.budget_to_onehot(budget_idx, device=device)
 
-        d_logits = torch.stack([router(h) for router in self.router_d], dim=1)
+        global_d_logits = self.router_d(h)
+        d_logits = global_d_logits.unsqueeze(1).expand(-1, self.num_layers, -1)
         layer_keep_logits = torch.stack([router(h) for router in self.router_lambda], dim=1)
 
         return {

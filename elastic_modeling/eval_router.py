@@ -74,7 +74,10 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
     d_choices = [int(choice) for choice in checkpoint["d_choices"]]
     budget_values = checkpoint["budget_values"]
 
-    first_router_weight = router_state["router_d.0.0.weight"]
+    if "router_d.0.weight" in router_state:
+        first_router_weight = router_state["router_d.0.weight"]
+    else:
+        first_router_weight = router_state["router_d.0.0.weight"]
     hidden_dim = first_router_weight.shape[0]
 
     router = BudgetRouter(
