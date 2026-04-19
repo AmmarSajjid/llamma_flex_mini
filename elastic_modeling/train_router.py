@@ -71,6 +71,7 @@ def parse_args():
     parser.add_argument("--max-examples", type=int, default=0)
     parser.add_argument("--fail-on-nan", action="store_true")
     parser.add_argument("--save-failure-state", action="store_true")
+    parser.add_argument("--skip-non-finite-steps", action="store_true")
     parser.add_argument(
         "--training-mode",
         choices=("end_to_end", "router_only"),
@@ -215,6 +216,7 @@ def raise_or_checkpoint_non_finite(
     optimizer,
     named_tensors,
     context,
+    raise_if_requested=True,
 ):
     bad_name = first_non_finite_name(named_tensors)
     if bad_name is None:
@@ -238,8 +240,39 @@ def raise_or_checkpoint_non_finite(
             failure_path,
         )
 
-    if args.fail_on_nan:
+    if args.fail_on_nan and raise_if_requested:
         raise RuntimeError(f"Non-finite tensor detected at step {step} during {context}: {bad_name}")
+
+
+def sanitize_or_skip_non_finite_grads(step, args, elastic_model, optimizer):
+    bad_name = None
+    for name, param in elastic_model.named_parameters():
+        if not param.requires_grad or param.grad is None:
+            continue
+        if not torch.isfinite(param.grad).all():
+            bad_name = name
+            break
+
+    if bad_name is None:
+        return False, None
+
+    raise_or_checkpoint_non_finite(
+        step=step,
+        args=args,
+        elastic_model=elastic_model,
+        optimizer=optimizer,
+        named_tensors=[(f"grad::{bad_name}", dict(elastic_model.named_parameters())[bad_name].grad)],
+        context="backward",
+        raise_if_requested=False,
+    )
+
+    if not args.skip_non_finite_steps:
+        return True, bad_name
+
+    for param in elastic_model.parameters():
+        if param.grad is not None:
+            param.grad = None
+    return True, bad_name
 
 
 def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
@@ -454,19 +487,18 @@ def main():
 
         should_step = step % args.grad_accum_steps == 0 or step == args.steps
         if should_step:
-            grad_named_tensors = [
-                (f"grad::{name}", param.grad)
-                for name, param in elastic_model.named_parameters()
-                if param.requires_grad and param.grad is not None
-            ]
-            raise_or_checkpoint_non_finite(
+            skipped_step, bad_grad_name = sanitize_or_skip_non_finite_grads(
                 step=step,
                 args=args,
                 elastic_model=elastic_model,
                 optimizer=optimizer,
-                named_tensors=grad_named_tensors,
-                context="backward",
             )
+            if skipped_step:
+                print(
+                    f"warning: skipped optimizer step at step {step} due to non-finite gradient in {bad_grad_name}"
+                )
+                optimizer.zero_grad(set_to_none=True)
+                continue
             if args.grad_clip_norm > 0.0:
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in elastic_model.parameters() if p.requires_grad],
