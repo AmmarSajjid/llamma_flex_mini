@@ -14,7 +14,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from elastic_modeling.budget_loss import compute_budget_loss
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
-from elastic_modeling.gumbel_utils import resolve_router_controls, sample_router_outputs
+from elastic_modeling.gumbel_utils import (
+    resolve_router_controls,
+    sample_router_outputs_batch_shared,
+)
 from elastic_modeling.router import BudgetRouter
 from helper_functions.helper_functions import collate_batch, tokenize_dataset
 
@@ -117,7 +120,9 @@ def evaluate_fixed_budget(model, router, tokenized_ds, tokenizer, budget_idx, bu
         )
 
         router_out = router(budget_idx_tensor, device=DEVICE)
-        sampled_router_out = sample_router_outputs(router_out, tau=1.0, hard=True)
+        sampled_router_out = sample_router_outputs_batch_shared(
+            router_out, tau=1.0, hard=True
+        )
         resolved = resolve_router_controls(sampled_router_out, d_choices)
 
         outputs = model(
