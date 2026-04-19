@@ -58,7 +58,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tau-start", type=float, default=1.0)
     parser.add_argument("--tau-end", type=float, default=0.2)
-    parser.add_argument("--distill-weight", type=float, default=1.0)
+    parser.add_argument("--distill-weight", type=float, default=0.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
     parser.add_argument("--keep-penalty-weight", type=float, default=1.0)
     parser.add_argument("--min-keep-ratio", type=float, default=0.25)
