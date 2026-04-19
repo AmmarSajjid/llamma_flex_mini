@@ -64,11 +64,13 @@ def parse_args():
     parser.add_argument("--min-keep-ratio", type=float, default=0.25)
     parser.add_argument("--ce-weight", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=0.5)
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--max-examples", type=int, default=0)
+    parser.add_argument("--fail-on-nan", action="store_true")
+    parser.add_argument("--save-failure-state", action="store_true")
     parser.add_argument(
         "--training-mode",
         choices=("end_to_end", "router_only"),
@@ -136,8 +138,8 @@ def sample_budget_indices(batch_size, num_budgets, device):
 
 
 def resolve_learning_rates(args):
-    default_backbone_lr = 4e-5
-    default_router_lr = 4e-5
+    default_backbone_lr = 1e-5
+    default_router_lr = 2e-5
 
     if args.lr is not None:
         if args.backbone_lr is None:
@@ -180,7 +182,7 @@ def create_optimizer(elastic_model, args):
             }
         )
 
-    return torch.optim.AdamW(param_groups)
+    return torch.optim.AdamW(param_groups, eps=1e-6)
 
 
 def create_scheduler(optimizer, total_steps, warmup_ratio):
@@ -194,6 +196,50 @@ def create_scheduler(optimizer, total_steps, warmup_ratio):
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def first_non_finite_name(named_tensors):
+    for name, tensor in named_tensors:
+        if tensor is None:
+            continue
+        if not torch.isfinite(tensor).all():
+            return name
+    return None
+
+
+def raise_or_checkpoint_non_finite(
+    *,
+    step,
+    args,
+    elastic_model,
+    optimizer,
+    named_tensors,
+    context,
+):
+    bad_name = first_non_finite_name(named_tensors)
+    if bad_name is None:
+        return
+
+    if args.save_failure_state:
+        failure_dir = Path(args.save_dir) / "failures"
+        os.makedirs(failure_dir, exist_ok=True)
+        failure_path = failure_dir / f"failure_step_{step:06d}.pt"
+        torch.save(
+            {
+                "step": step,
+                "context": context,
+                "bad_tensor": bad_name,
+                "elastic_model_state_dict": elastic_model.state_dict(),
+                "router_state_dict": elastic_model.model.router.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "budget_values": list(args.budget_values),
+                "d_choices": list(args.d_choices),
+            },
+            failure_path,
+        )
+
+    if args.fail_on_nan:
+        raise RuntimeError(f"Non-finite tensor detected at step {step} during {context}: {bad_name}")
 
 
 def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
@@ -288,8 +334,30 @@ def main():
         tau = tau_for_step(step - 1, args.steps, args.tau_start, args.tau_end)
 
         router_out = router(batch_budget_idx, device=DEVICE)
+        raise_or_checkpoint_non_finite(
+            step=step,
+            args=args,
+            elastic_model=elastic_model,
+            optimizer=optimizer,
+            named_tensors=[
+                ("router_out.d_logits", router_out["d_logits"]),
+                ("router_out.layer_keep_logits", router_out["layer_keep_logits"]),
+            ],
+            context="router forward",
+        )
         sampled_router_out = sample_router_outputs_batch_shared(
             router_out, tau=tau, hard=False
+        )
+        raise_or_checkpoint_non_finite(
+            step=step,
+            args=args,
+            elastic_model=elastic_model,
+            optimizer=optimizer,
+            named_tensors=[
+                ("sampled_router_out.d_probs", sampled_router_out["d_probs"]),
+                ("sampled_router_out.layer_keep_probs", sampled_router_out["layer_keep_probs"]),
+            ],
+            context="router sampling",
         )
 
         train_autocast = (
@@ -318,6 +386,20 @@ def main():
                 layer_keep_probs=sampled_router_out["layer_keep_probs"],
                 min_keep_ratio=args.min_keep_ratio,
             )
+        raise_or_checkpoint_non_finite(
+            step=step,
+            args=args,
+            elastic_model=elastic_model,
+            optimizer=optimizer,
+            named_tensors=[
+                ("outputs.logits", outputs.logits),
+                ("lm_loss", lm_loss),
+                ("budget_loss", budget_stats["loss"]),
+                ("budget_achieved", budget_stats["achieved_budget"]),
+                ("keep_penalty", keep_penalty),
+            ],
+            context="elastic forward",
+        )
 
         kd_loss = lm_loss.new_zeros(())
         if teacher_model is not None:
@@ -339,6 +421,16 @@ def main():
                     labels=batch["labels"],
                     temperature=args.temperature,
                 )
+        raise_or_checkpoint_non_finite(
+            step=step,
+            args=args,
+            elastic_model=elastic_model,
+            optimizer=optimizer,
+            named_tensors=[
+                ("kd_loss", kd_loss),
+            ],
+            context="distillation",
+        )
 
         total_loss = (
             args.ce_weight * lm_loss
@@ -346,12 +438,35 @@ def main():
             + args.budget_weight * budget_stats["loss"]
             + args.keep_penalty_weight * keep_penalty
         )
+        raise_or_checkpoint_non_finite(
+            step=step,
+            args=args,
+            elastic_model=elastic_model,
+            optimizer=optimizer,
+            named_tensors=[
+                ("total_loss", total_loss),
+            ],
+            context="loss aggregation",
+        )
         scaled_loss = total_loss / args.grad_accum_steps
 
         scaled_loss.backward()
 
         should_step = step % args.grad_accum_steps == 0 or step == args.steps
         if should_step:
+            grad_named_tensors = [
+                (f"grad::{name}", param.grad)
+                for name, param in elastic_model.named_parameters()
+                if param.requires_grad and param.grad is not None
+            ]
+            raise_or_checkpoint_non_finite(
+                step=step,
+                args=args,
+                elastic_model=elastic_model,
+                optimizer=optimizer,
+                named_tensors=grad_named_tensors,
+                context="backward",
+            )
             if args.grad_clip_norm > 0.0:
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in elastic_model.parameters() if p.requires_grad],

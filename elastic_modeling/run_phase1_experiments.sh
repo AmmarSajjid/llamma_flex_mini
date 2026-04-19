@@ -10,8 +10,10 @@ python elastic_modeling/train_router.py \
   --batch-size 1 \
   --grad-accum-steps 4 \
   --max-examples 2000 \
-  --use-bf16 \
+  --warmup-ratio 0.10 \
   --gradient-checkpointing \
+  --fail-on-nan \
+  --save-failure-state \
   --save-every 100 \
   --log-every 10
 
@@ -30,8 +32,10 @@ python elastic_modeling/train_router.py \
   --batch-size 1 \
   --grad-accum-steps 8 \
   --dataset-path data/micro_fineweb_subset \
-  --use-bf16 \
+  --warmup-ratio 0.10 \
   --gradient-checkpointing \
+  --fail-on-nan \
+  --save-failure-state \
   --save-every 250 \
   --log-every 25
 

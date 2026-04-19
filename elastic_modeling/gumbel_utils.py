@@ -2,8 +2,14 @@ import torch
 import torch.nn.functional as F
 
 
+def _sanitize_logits(logits, clamp_value=20.0):
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=clamp_value, neginf=-clamp_value)
+    return logits.clamp(min=-clamp_value, max=clamp_value)
+
+
 def sample_gumbel_softmax(logits, tau=1.0, hard=False):
-    return F.gumbel_softmax(logits, tau=tau, hard=hard, dim=-1)
+    safe_logits = _sanitize_logits(logits)
+    return F.gumbel_softmax(safe_logits, tau=tau, hard=hard, dim=-1)
 
 
 def sample_router_outputs(router_out, tau=1.0, hard=False):
