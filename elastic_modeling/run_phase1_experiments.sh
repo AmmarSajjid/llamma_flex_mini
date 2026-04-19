@@ -27,8 +27,8 @@ echo
 echo "Phase 1 short 100k run"
 python elastic_modeling/train_router.py \
   --steps 2000 \
-  --batch-size 8 \
-  --grad-accum-steps 2 \
+  --batch-size 1 \
+  --grad-accum-steps 8 \
   --dataset-path data/micro_fineweb_subset \
   --use-bf16 \
   --gradient-checkpointing \
@@ -40,5 +40,6 @@ echo "Evaluate short-run checkpoint"
 python elastic_modeling/eval_router.py \
   --checkpoint-path checkpoints/router_phase1/router_step_002000.pt \
   --dataset-path data/micro_fineweb_subset \
+  --max-examples 5000 \
   --compare-base-full-budget \
   --csv-path checkpoints/router_phase1/router_step_002000_eval.csv

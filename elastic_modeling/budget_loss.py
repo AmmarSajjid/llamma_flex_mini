@@ -111,6 +111,25 @@ def compute_budget_loss(
     }
 
 
+def keep_ratio_penalty(layer_keep_probs=None, layer_keep=None, min_keep_ratio=0.0):
+    if min_keep_ratio <= 0.0:
+        if layer_keep_probs is not None:
+            return layer_keep_probs.new_zeros(())
+        if layer_keep is not None:
+            return layer_keep.float().new_zeros(())
+        raise ValueError("Provide layer_keep_probs or layer_keep when min_keep_ratio > 0")
+
+    if layer_keep_probs is not None:
+        keep_ratio = layer_keep_probs[..., 1].mean(dim=-1)
+    elif layer_keep is not None:
+        keep_ratio = layer_keep.float().mean(dim=-1)
+    else:
+        raise ValueError("Provide layer_keep_probs or layer_keep")
+
+    floor = torch.full_like(keep_ratio, float(min_keep_ratio))
+    return F.relu(floor - keep_ratio).pow(2).mean()
+
+
 def distillation_loss(student_logits, teacher_logits, labels, temperature=1.0):
     if student_logits.shape != teacher_logits.shape:
         raise ValueError("student_logits and teacher_logits must have the same shape")

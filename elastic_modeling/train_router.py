@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 import sys
@@ -13,7 +14,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from elastic_modeling.budget_loss import compute_budget_loss, distillation_loss
+from elastic_modeling.budget_loss import (
+    compute_budget_loss,
+    distillation_loss,
+    keep_ratio_penalty,
+)
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
 from elastic_modeling.gumbel_utils import (
     resolve_router_controls,
@@ -48,14 +53,18 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--backbone-lr", type=float, default=None)
     parser.add_argument("--router-lr", type=float, default=None)
+    parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tau-start", type=float, default=1.0)
     parser.add_argument("--tau-end", type=float, default=0.2)
-    parser.add_argument("--distill-weight", type=float, default=0.0)
+    parser.add_argument("--distill-weight", type=float, default=1.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
+    parser.add_argument("--keep-penalty-weight", type=float, default=1.0)
+    parser.add_argument("--min-keep-ratio", type=float, default=0.25)
     parser.add_argument("--ce-weight", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--save-every", type=int, default=50)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -78,7 +87,7 @@ def parse_args():
         "--budget-values",
         type=float,
         nargs="+",
-        default=(0.35, 0.5, 0.75, 1.0),
+        default=(0.25, 0.5, 0.75, 1.0),
         help="Target model compute ratios sampled during training.",
     )
     return parser.parse_args()
@@ -92,7 +101,8 @@ def set_seed(seed):
 
 
 def get_default_d_choices(intermediate_size):
-    return sorted({max(1, intermediate_size // 4), max(1, intermediate_size // 2), intermediate_size})
+    ratios = (0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
+    return sorted({max(1, int(round(intermediate_size * ratio / 64.0) * 64)) for ratio in ratios})
 
 
 def configure_trainable_params(elastic_model, training_mode):
@@ -126,8 +136,8 @@ def sample_budget_indices(batch_size, num_budgets, device):
 
 
 def resolve_learning_rates(args):
-    default_backbone_lr = 2e-5
-    default_router_lr = 1e-4
+    default_backbone_lr = 4e-5
+    default_router_lr = 4e-5
 
     if args.lr is not None:
         if args.backbone_lr is None:
@@ -171,6 +181,19 @@ def create_optimizer(elastic_model, args):
         )
 
     return torch.optim.AdamW(param_groups)
+
+
+def create_scheduler(optimizer, total_steps, warmup_ratio):
+    warmup_steps = max(1, int(total_steps * warmup_ratio))
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step + 1) / float(warmup_steps)
+
+        progress = (current_step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
 def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
@@ -243,6 +266,7 @@ def main():
     elastic_model.train()
 
     optimizer = create_optimizer(elastic_model, args)
+    scheduler = create_scheduler(optimizer, args.steps, args.warmup_ratio)
 
     example_stream = cycle_tokenized_examples(tokenized_ds)
     running_loss = 0.0
@@ -290,6 +314,10 @@ def main():
                 layer_keep_probs=sampled_router_out["layer_keep_probs"],
                 d_probs=sampled_router_out["d_probs"],
             )
+            keep_penalty = keep_ratio_penalty(
+                layer_keep_probs=sampled_router_out["layer_keep_probs"],
+                min_keep_ratio=args.min_keep_ratio,
+            )
 
         kd_loss = lm_loss.new_zeros(())
         if teacher_model is not None:
@@ -316,6 +344,7 @@ def main():
             args.ce_weight * lm_loss
             + args.distill_weight * kd_loss
             + args.budget_weight * budget_stats["loss"]
+            + args.keep_penalty_weight * keep_penalty
         )
         scaled_loss = total_loss / args.grad_accum_steps
 
@@ -323,7 +352,13 @@ def main():
 
         should_step = step % args.grad_accum_steps == 0 or step == args.steps
         if should_step:
+            if args.grad_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in elastic_model.parameters() if p.requires_grad],
+                    max_norm=args.grad_clip_norm,
+                )
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         running_loss += float(total_loss.item())
@@ -343,6 +378,7 @@ def main():
                 f"lm={lm_loss.item():.4f} "
                 f"kd={kd_loss.item():.4f} "
                 f"budget={budget_stats['loss'].item():.4f} "
+                f"keep_pen={keep_penalty.item():.4f} "
                 f"target={target_budget[0].item():.3f} "
                 f"achieved={budget_stats['achieved_budget'].mean().item():.3f} "
                 f"keep={mean_kept_layers:.3f} "
