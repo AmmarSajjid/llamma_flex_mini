@@ -32,7 +32,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train a phase-1 flex-MLP + layer-skip router.")
+    parser = argparse.ArgumentParser(description="Train a phase-1 flex-MLP elastic router.")
     parser.add_argument(
         "--model-path",
         default=str(REPO_ROOT / "models" / "qwen_model_reordered_mlp_100k"),
@@ -72,6 +72,7 @@ def parse_args():
     parser.add_argument("--fail-on-nan", action="store_true")
     parser.add_argument("--save-failure-state", action="store_true")
     parser.add_argument("--skip-non-finite-steps", action="store_true")
+    parser.add_argument("--enable-layer-skip", action="store_true")
     parser.add_argument(
         "--training-mode",
         choices=("end_to_end", "router_only"),
@@ -199,6 +200,12 @@ def create_scheduler(optimizer, total_steps, warmup_ratio):
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def build_always_keep_probs(batch_size, num_layers, device):
+    layer_keep_probs = torch.zeros((batch_size, num_layers, 2), device=device, dtype=torch.float32)
+    layer_keep_probs[..., 1] = 1.0
+    return layer_keep_probs
+
+
 def first_non_finite_name(named_tensors):
     for name, tensor in named_tensors:
         if tensor is None:
@@ -290,6 +297,7 @@ def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
             "grad_accum_steps": args.grad_accum_steps,
             "use_bf16": args.use_bf16,
             "gradient_checkpointing": args.gradient_checkpointing,
+            "enable_layer_skip": args.enable_layer_skip,
             "backbone_lr": args.backbone_lr,
             "router_lr": args.router_lr,
         },
@@ -381,6 +389,12 @@ def main():
         sampled_router_out = sample_router_outputs_batch_shared(
             router_out, tau=tau, hard=False
         )
+        if not args.enable_layer_skip:
+            sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
+                batch_size=args.batch_size,
+                num_layers=elastic_model.config.num_hidden_layers,
+                device=DEVICE,
+            )
         raise_or_checkpoint_non_finite(
             step=step,
             args=args,

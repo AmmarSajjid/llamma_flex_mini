@@ -73,6 +73,7 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
     router_state = checkpoint["router_state_dict"]
     d_choices = [int(choice) for choice in checkpoint["d_choices"]]
     budget_values = checkpoint["budget_values"]
+    enable_layer_skip = checkpoint.get("enable_layer_skip", False)
 
     if "router_d.0.weight" in router_state:
         first_router_weight = router_state["router_d.0.weight"]
@@ -87,11 +88,25 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
         hidden_dim=hidden_dim,
     )
     router.load_state_dict(router_state)
-    return checkpoint, router, d_choices, budget_values
+    return checkpoint, router, d_choices, budget_values, enable_layer_skip
+
+
+def build_always_keep(batch_size, num_layers, device):
+    return torch.ones((batch_size, num_layers), device=device, dtype=torch.bool)
 
 
 @torch.no_grad()
-def evaluate_fixed_budget(model, router, tokenized_ds, tokenizer, budget_idx, budget_value, d_choices, batch_size):
+def evaluate_fixed_budget(
+    model,
+    router,
+    tokenized_ds,
+    tokenizer,
+    budget_idx,
+    budget_value,
+    d_choices,
+    batch_size,
+    enable_layer_skip,
+):
     model.eval()
     router.eval()
 
@@ -127,6 +142,12 @@ def evaluate_fixed_budget(model, router, tokenized_ds, tokenizer, budget_idx, bu
             router_out, tau=1.0, hard=True
         )
         resolved = resolve_router_controls(sampled_router_out, d_choices)
+        if not enable_layer_skip:
+            resolved["layer_keep"] = build_always_keep(
+                batch_size=current_batch_size,
+                num_layers=model.config.num_hidden_layers,
+                device=DEVICE,
+            )
 
         outputs = model(
             input_ids=batch["input_ids"],
@@ -266,7 +287,7 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
 
 def main():
     args = parse_args()
-    checkpoint, router, d_choices, checkpoint_budget_values = load_router_from_checkpoint(
+    checkpoint, router, d_choices, checkpoint_budget_values, enable_layer_skip = load_router_from_checkpoint(
         args.checkpoint_path,
         AutoModelForCausalLM.from_pretrained(args.model_path).config,
     )
@@ -317,6 +338,7 @@ def main():
             budget_value=budget_value,
             d_choices=d_choices,
             batch_size=args.batch_size,
+            enable_layer_skip=enable_layer_skip,
         )
         elastic_metrics.append(metrics)
         print(
