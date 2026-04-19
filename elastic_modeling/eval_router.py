@@ -293,6 +293,8 @@ def main():
         d_choices=d_choices,
         router=router,
     ).to(DEVICE)
+    if checkpoint.get("elastic_model_state_dict") is not None:
+        elastic_model.load_state_dict(checkpoint["elastic_model_state_dict"])
 
     print("\nElastic evaluation")
     print("-" * 88)

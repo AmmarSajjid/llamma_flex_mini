@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.qwen2.modeling_qwen2 import (
     DynamicCache,
@@ -8,7 +9,10 @@ from transformers.models.qwen2.modeling_qwen2 import (
 )
 
 from elastic_modeling.elastic_layer import ElasticQwen2DecoderLayer
-from elastic_modeling.gumbel_utils import resolve_router_controls, sample_router_outputs
+from elastic_modeling.gumbel_utils import (
+    resolve_router_controls,
+    sample_router_outputs_batch_shared,
+)
 
 
 class ElasticQwen2Model(nn.Module):
@@ -28,6 +32,12 @@ class ElasticQwen2Model(nn.Module):
         self.layers = nn.ModuleList(
             [ElasticQwen2DecoderLayer(layer, d_choices=self.d_choices) for layer in base_model.layers]
         )
+
+    def gradient_checkpointing_enable(self):
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        self.gradient_checkpointing = False
 
     def _normalize_budget_idx(self, budget_idx, batch_size, device):
         if budget_idx is None:
@@ -122,7 +132,9 @@ class ElasticQwen2Model(nn.Module):
             and budget_idx is not None
         ):
             router_out = self.router(budget_idx, device=device)
-            sampled_out = sample_router_outputs(router_out, tau=tau, hard=hard)
+            sampled_out = sample_router_outputs_batch_shared(
+                router_out, tau=tau, hard=hard
+            )
             if hard:
                 resolved = resolve_router_controls(sampled_out, self.d_choices)
                 d_keep = resolved["d_keep"]
@@ -204,6 +216,8 @@ class ElasticQwen2Model(nn.Module):
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        if self.gradient_checkpointing and self.training:
+            use_cache = False
         controls = self._resolve_execution_controls(
             batch_size=hidden_states.shape[0],
             device=hidden_states.device,
@@ -217,19 +231,32 @@ class ElasticQwen2Model(nn.Module):
         )
 
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-            hidden_states = decoder_layer(
-                hidden_states,
-                attention_mask=causal_mask_mapping[self.config.layer_types[i]],
-                position_embeddings=position_embeddings,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                layer_keep=bool(controls["layer_keep"][i].item()),
-                d_keep=int(controls["d_keep"][i].item()),
-                layer_keep_prob=None if controls["layer_keep_probs"] is None else controls["layer_keep_probs"][i],
-                d_probs=None if controls["d_probs"] is None else controls["d_probs"][i],
+            layer_kwargs = {
+                "attention_mask": causal_mask_mapping[self.config.layer_types[i]],
+                "position_embeddings": position_embeddings,
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "layer_keep": bool(controls["layer_keep"][i].item()),
+                "d_keep": int(controls["d_keep"][i].item()),
+                "layer_keep_prob": None if controls["layer_keep_probs"] is None else controls["layer_keep_probs"][i],
+                "d_probs": None if controls["d_probs"] is None else controls["d_probs"][i],
                 **kwargs,
-            )
+            }
+            if self.gradient_checkpointing and self.training:
+                def custom_forward(hidden_states_input):
+                    return decoder_layer(hidden_states_input, **layer_kwargs)
+
+                hidden_states = activation_checkpoint(
+                    custom_forward,
+                    hidden_states,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states = decoder_layer(
+                    hidden_states,
+                    **layer_kwargs,
+                )
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(

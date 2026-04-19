@@ -7,8 +7,11 @@ cd "$REPO_ROOT"
 echo "Phase 1 smoke run"
 python elastic_modeling/train_router.py \
   --steps 200 \
-  --batch-size 2 \
+  --batch-size 1 \
+  --grad-accum-steps 4 \
   --max-examples 2000 \
+  --use-bf16 \
+  --gradient-checkpointing \
   --save-every 100 \
   --log-every 10
 
@@ -24,8 +27,11 @@ echo
 echo "Phase 1 short 100k run"
 python elastic_modeling/train_router.py \
   --steps 2000 \
-  --batch-size 2 \
+  --batch-size 8 \
+  --grad-accum-steps 2 \
   --dataset-path data/micro_fineweb_subset \
+  --use-bf16 \
+  --gradient-checkpointing \
   --save-every 250 \
   --log-every 25
 
