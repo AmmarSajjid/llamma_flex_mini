@@ -1,4 +1,5 @@
 .venv
+.codex
 __pycache__
 
 data
