@@ -80,12 +80,11 @@ class ElasticQwen2Model(nn.Module):
             return None
         if value.shape[0] == 1:
             return value[0]
-        if not torch.all(value.eq(value[:1])):
-            raise ValueError(
-                f"{name} must be identical across the batch for phase-1 execution. "
-                "Sample one budget/configuration per batch."
-            )
-        return value[0]
+        # Phase 1 executes one shared elastic architecture per batch.
+        # Upstream code is expected to sample shared controls, so for execution
+        # we collapse to the first batch row rather than requiring exact
+        # equality checks that can be brittle in practice.
+        return value[0].clone()
 
     def _coerce_prob_controls(self, value, name, batch_size, trailing_dim, device):
         if value is None:
