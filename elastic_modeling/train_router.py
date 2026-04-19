@@ -15,7 +15,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from elastic_modeling.budget_loss import compute_budget_loss, distillation_loss
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
-from elastic_modeling.gumbel_utils import resolve_router_controls, sample_router_outputs
+from elastic_modeling.gumbel_utils import (
+    resolve_router_controls,
+    sample_router_outputs_batch_shared,
+)
 from elastic_modeling.router import BudgetRouter
 from helper_functions.helper_functions import collate_batch, tokenize_dataset
 
@@ -187,7 +190,9 @@ def main():
         tau = tau_for_step(step - 1, args.steps, args.tau_start, args.tau_end)
 
         router_out = router(batch_budget_idx, device=DEVICE)
-        sampled_router_out = sample_router_outputs(router_out, tau=tau, hard=False)
+        sampled_router_out = sample_router_outputs_batch_shared(
+            router_out, tau=tau, hard=False
+        )
 
         outputs = elastic_model(
             input_ids=batch["input_ids"],

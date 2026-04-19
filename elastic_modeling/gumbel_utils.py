@@ -19,6 +19,26 @@ def sample_router_outputs(router_out, tau=1.0, hard=False):
     }
 
 
+def sample_router_outputs_batch_shared(router_out, tau=1.0, hard=False):
+    batch_size = router_out["d_logits"].shape[0]
+
+    shared_d_probs = sample_gumbel_softmax(
+        router_out["d_logits"][:1], tau=tau, hard=hard
+    )
+    shared_layer_keep_probs = sample_gumbel_softmax(
+        router_out["layer_keep_logits"][:1], tau=tau, hard=hard
+    )
+
+    d_probs = shared_d_probs.expand(batch_size, -1, -1)
+    layer_keep_probs = shared_layer_keep_probs.expand(batch_size, -1, -1)
+
+    return {
+        "h": router_out["h"],
+        "d_probs": d_probs,
+        "layer_keep_probs": layer_keep_probs,
+    }
+
+
 def resolve_router_controls(sampled_router_out, d_choices):
     d_choice_tensor = torch.as_tensor(
         d_choices,
