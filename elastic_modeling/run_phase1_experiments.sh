@@ -17,7 +17,8 @@ echo "Evaluate latest smoke checkpoint"
 python elastic_modeling/eval_router.py \
   --checkpoint-path checkpoints/router_phase1/router_step_000200.pt \
   --max-examples 2000 \
-  --compare-base-full-budget
+  --compare-base-full-budget \
+  --csv-path checkpoints/router_phase1/router_step_000200_eval.csv
 
 echo
 echo "Phase 1 short 100k run"
@@ -33,4 +34,5 @@ echo "Evaluate short-run checkpoint"
 python elastic_modeling/eval_router.py \
   --checkpoint-path checkpoints/router_phase1/router_step_002000.pt \
   --dataset-path data/micro_fineweb_subset \
-  --compare-base-full-budget
+  --compare-base-full-budget \
+  --csv-path checkpoints/router_phase1/router_step_002000_eval.csv

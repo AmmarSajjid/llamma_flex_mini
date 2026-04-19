@@ -1,4 +1,5 @@
 import argparse
+import csv
 import math
 import sys
 from pathlib import Path
@@ -55,6 +56,11 @@ def parse_args():
         "--compare-base-full-budget",
         action="store_true",
         help="Also evaluate the reordered base model for reference.",
+    )
+    parser.add_argument(
+        "--csv-path",
+        default=None,
+        help="Optional path to save evaluation metrics as CSV.",
     )
     return parser.parse_args()
 
@@ -186,6 +192,70 @@ def evaluate_base_model(model, tokenized_ds, tokenizer, batch_size):
     }
 
 
+def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_step, d_choices, dataset_path, base_metrics=None):
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "row_type",
+        "checkpoint_path",
+        "checkpoint_step",
+        "dataset_path",
+        "d_choices",
+        "target_budget",
+        "achieved_budget",
+        "keep_ratio",
+        "width_ratio",
+        "avg_loss",
+        "perplexity",
+        "num_examples",
+        "num_tokens",
+    ]
+
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        d_choices_str = ",".join(str(choice) for choice in d_choices)
+        for metrics in elastic_metrics:
+            writer.writerow(
+                {
+                    "row_type": "elastic",
+                    "checkpoint_path": str(checkpoint_path),
+                    "checkpoint_step": checkpoint_step,
+                    "dataset_path": str(dataset_path),
+                    "d_choices": d_choices_str,
+                    "target_budget": metrics["budget"],
+                    "achieved_budget": metrics["achieved_budget"],
+                    "keep_ratio": metrics["keep_ratio"],
+                    "width_ratio": metrics["width_ratio"],
+                    "avg_loss": metrics["avg_loss"],
+                    "perplexity": metrics["perplexity"],
+                    "num_examples": metrics["num_examples"],
+                    "num_tokens": metrics["num_tokens"],
+                }
+            )
+
+        if base_metrics is not None:
+            writer.writerow(
+                {
+                    "row_type": "base",
+                    "checkpoint_path": str(checkpoint_path),
+                    "checkpoint_step": checkpoint_step,
+                    "dataset_path": str(dataset_path),
+                    "d_choices": d_choices_str,
+                    "target_budget": "",
+                    "achieved_budget": "",
+                    "keep_ratio": "",
+                    "width_ratio": "",
+                    "avg_loss": base_metrics["avg_loss"],
+                    "perplexity": base_metrics["perplexity"],
+                    "num_examples": base_metrics["num_examples"],
+                    "num_tokens": base_metrics["num_tokens"],
+                }
+            )
+
+
 def main():
     args = parse_args()
     checkpoint, router, d_choices, checkpoint_budget_values = load_router_from_checkpoint(
@@ -226,6 +296,7 @@ def main():
         f"{'loss':>10} {'ppl':>12} {'tokens':>12}"
     )
 
+    elastic_metrics = []
     for budget_idx, budget_value in enumerate(budget_values):
         metrics = evaluate_fixed_budget(
             model=elastic_model,
@@ -237,6 +308,7 @@ def main():
             d_choices=d_choices,
             batch_size=args.batch_size,
         )
+        elastic_metrics.append(metrics)
         print(
             f"{metrics['budget']:8.3f} {metrics['achieved_budget']:9.3f} "
             f"{metrics['keep_ratio']:8.3f} {metrics['width_ratio']:8.3f} "
@@ -244,6 +316,7 @@ def main():
             f"{metrics['num_tokens']:12d}"
         )
 
+    base_metrics = None
     if args.compare_base_full_budget:
         base_metrics = evaluate_base_model(
             model=teacher_model,
@@ -256,6 +329,18 @@ def main():
         print(f"Avg loss:   {base_metrics['avg_loss']:.6f}")
         print(f"Perplexity: {base_metrics['perplexity']:.6f}")
         print(f"Tokens:     {base_metrics['num_tokens']}")
+
+    if args.csv_path is not None:
+        write_metrics_csv(
+            csv_path=args.csv_path,
+            elastic_metrics=elastic_metrics,
+            checkpoint_path=args.checkpoint_path,
+            checkpoint_step=checkpoint.get("step", "unknown"),
+            d_choices=d_choices,
+            dataset_path=args.dataset_path,
+            base_metrics=base_metrics,
+        )
+        print(f"\nSaved CSV summary to: {args.csv_path}")
 
 
 if __name__ == "__main__":
