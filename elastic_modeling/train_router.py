@@ -393,8 +393,11 @@ def main():
             ],
             context="router forward",
         )
+        # Use straight-through Gumbel-Softmax so the executed elastic model sees
+        # a single hard architectural choice, while gradients still flow through
+        # the underlying soft sample.
         sampled_router_out = sample_router_outputs_batch_shared(
-            router_out, tau=tau, hard=False, logit_scale=logit_scale
+            router_out, tau=tau, hard=True, logit_scale=logit_scale
         )
         if not args.enable_layer_skip:
             sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
