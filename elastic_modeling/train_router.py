@@ -57,7 +57,7 @@ def parse_args():
     parser.add_argument("--tau-start", type=float, default=1.0)
     parser.add_argument("--tau-end", type=float, default=0.2)
     parser.add_argument("--logit-scale-start", type=float, default=1.0)
-    parser.add_argument("--logit-scale-end", type=float, default=1.0)
+    parser.add_argument("--logit-scale-end", type=float, default=4.0)
     parser.add_argument("--distill-weight", type=float, default=0.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
     parser.add_argument("--keep-penalty-weight", type=float, default=1.0)

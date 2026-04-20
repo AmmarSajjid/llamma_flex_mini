@@ -83,14 +83,14 @@ def concrete_parameter_count_from_controls(layer_keep, d_keep, config):
     return total_params, full_model_params, achieved_budget
 
 
-def budget_hinge_loss(achieved_budget, target_budget, reduction="mean"):
-    target_budget = target_budget.to(device=achieved_budget.device, dtype=achieved_budget.dtype)
-    excess_ratio = F.relu(achieved_budget - target_budget)
+def budget_hinge_loss(expected_params, target_params, reduction="mean"):
+    target_params = target_params.to(device=expected_params.device, dtype=expected_params.dtype)
+    excess_params = F.relu(expected_params - target_params)
     if reduction == "none":
-        return excess_ratio
+        return excess_params
     if reduction == "sum":
-        return excess_ratio.sum()
-    return excess_ratio.mean()
+        return excess_params.sum()
+    return excess_params.mean()
 
 
 def compute_budget_loss(
@@ -130,7 +130,7 @@ def compute_budget_loss(
         target_budget = target_budget.expand_as(achieved_budget)
 
     target_params = target_budget * full_params
-    loss = budget_hinge_loss(achieved_budget, target_budget)
+    loss = budget_hinge_loss(expected_params, target_params)
     return {
         "loss": loss,
         "achieved_budget": achieved_budget,
@@ -138,6 +138,7 @@ def compute_budget_loss(
         "expected_params": expected_params,
         "target_params": target_params,
         "full_params": full_params,
+        "excess_params": F.relu(expected_params - target_params),
     }
 
 

@@ -9,11 +9,15 @@ SMOKE_STEPS="${SMOKE_STEPS:-200}"
 SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-1}"
 SMOKE_GRAD_ACCUM="${SMOKE_GRAD_ACCUM:-4}"
 SMOKE_MAX_EXAMPLES="${SMOKE_MAX_EXAMPLES:-2000}"
+SMOKE_LOGIT_SCALE_START="${SMOKE_LOGIT_SCALE_START:-1.0}"
+SMOKE_LOGIT_SCALE_END="${SMOKE_LOGIT_SCALE_END:-2.0}"
 
 SHORT_STEPS="${SHORT_STEPS:-12500}"
 SHORT_BATCH_SIZE="${SHORT_BATCH_SIZE:-8}"
 SHORT_GRAD_ACCUM="${SHORT_GRAD_ACCUM:-2}"
 SHORT_EVAL_MAX_EXAMPLES="${SHORT_EVAL_MAX_EXAMPLES:-5000}"
+SHORT_LOGIT_SCALE_START="${SHORT_LOGIT_SCALE_START:-1.0}"
+SHORT_LOGIT_SCALE_END="${SHORT_LOGIT_SCALE_END:-4.0}"
 
 SHORT_STEP_TAG="$(printf "%06d" "$SHORT_STEPS")"
 
@@ -25,6 +29,8 @@ if [[ "$RUN_SMOKE_RUN" == "1" ]]; then
     --grad-accum-steps "$SMOKE_GRAD_ACCUM" \
     --max-examples "$SMOKE_MAX_EXAMPLES" \
     --warmup-ratio 0.10 \
+    --logit-scale-start "$SMOKE_LOGIT_SCALE_START" \
+    --logit-scale-end "$SMOKE_LOGIT_SCALE_END" \
     --fail-on-nan \
     --save-failure-state \
     --skip-non-finite-steps \
@@ -48,6 +54,8 @@ python elastic_modeling/train_router.py \
   --grad-accum-steps "$SHORT_GRAD_ACCUM" \
   --dataset-path data/micro_fineweb_subset \
   --warmup-ratio 0.10 \
+  --logit-scale-start "$SHORT_LOGIT_SCALE_START" \
+  --logit-scale-end "$SHORT_LOGIT_SCALE_END" \
   --fail-on-nan \
   --save-failure-state \
   --skip-non-finite-steps \
