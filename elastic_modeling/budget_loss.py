@@ -5,41 +5,18 @@ import torch.nn.functional as F
 def get_parameter_count_components(config):
     hidden_size = int(config.hidden_size)
     intermediate_size = int(config.intermediate_size)
-    vocab_size = int(config.vocab_size)
     num_layers = int(config.num_hidden_layers)
-    num_attention_heads = int(config.num_attention_heads)
-    num_key_value_heads = int(config.num_key_value_heads)
-    head_dim = int(getattr(config, "head_dim", hidden_size // num_attention_heads))
-    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-
-    embed_tokens_params = vocab_size * hidden_size
-    lm_head_params = 0 if tie_word_embeddings else hidden_size * vocab_size
-    final_norm_params = hidden_size
-
-    q_proj_params = hidden_size * (num_attention_heads * head_dim) + (num_attention_heads * head_dim)
-    k_proj_params = hidden_size * (num_key_value_heads * head_dim) + (num_key_value_heads * head_dim)
-    v_proj_params = hidden_size * (num_key_value_heads * head_dim) + (num_key_value_heads * head_dim)
-    o_proj_params = (num_attention_heads * head_dim) * hidden_size
-    attn_params = q_proj_params + k_proj_params + v_proj_params + o_proj_params
-
-    norm_params = 3 * hidden_size
 
     gate_proj_params = hidden_size * intermediate_size
     up_proj_params = hidden_size * intermediate_size
     down_proj_params = intermediate_size * hidden_size
     mlp_full_params = gate_proj_params + up_proj_params + down_proj_params
-
-    full_layer_params = attn_params + (2 * hidden_size) + mlp_full_params
-    shared_non_layer_params = embed_tokens_params + lm_head_params + final_norm_params
-    full_model_params = shared_non_layer_params + num_layers * full_layer_params
+    full_elastic_params = num_layers * mlp_full_params
 
     return {
-        "shared_non_layer_params": float(shared_non_layer_params),
-        "fixed_layer_params": float(attn_params + (2 * hidden_size)),
         "mlp_full_params": float(mlp_full_params),
-        "full_layer_params": float(full_layer_params),
-        "full_model_params": float(full_model_params),
-        "norm_params": float(norm_params),
+        "num_layers": float(num_layers),
+        "full_elastic_params": float(full_elastic_params),
     }
 
 
@@ -57,14 +34,12 @@ def expected_parameter_count_from_probs(layer_keep_probs, d_probs, d_choices, co
     expected_d_ratio = (d_probs * d_ratios.view(1, 1, -1)).sum(dim=-1)
 
     keep_prob = layer_keep_probs[..., 1]
-    expected_layer_params = keep_prob * (
-        components["fixed_layer_params"] + components["mlp_full_params"] * expected_d_ratio
-    )
-    expected_total_params = components["shared_non_layer_params"] + expected_layer_params.sum(dim=-1)
+    expected_layer_params = keep_prob * (components["mlp_full_params"] * expected_d_ratio)
+    expected_total_params = expected_layer_params.sum(dim=-1)
 
-    full_model_params = torch.full_like(expected_total_params, components["full_model_params"])
-    achieved_budget = expected_total_params / full_model_params
-    return expected_total_params, full_model_params, achieved_budget
+    full_elastic_params = torch.full_like(expected_total_params, components["full_elastic_params"])
+    achieved_budget = expected_total_params / full_elastic_params
+    return expected_total_params, full_elastic_params, achieved_budget
 
 
 def concrete_parameter_count_from_controls(layer_keep, d_keep, config):
@@ -74,13 +49,11 @@ def concrete_parameter_count_from_controls(layer_keep, d_keep, config):
     components = get_parameter_count_components(config)
     keep = layer_keep.to(dtype=torch.float32)
     d_ratio = d_keep.to(dtype=torch.float32) / float(config.intermediate_size)
-    layer_params = keep * (
-        components["fixed_layer_params"] + components["mlp_full_params"] * d_ratio
-    )
-    total_params = components["shared_non_layer_params"] + layer_params.sum(dim=-1)
-    full_model_params = torch.full_like(total_params, components["full_model_params"])
-    achieved_budget = total_params / full_model_params
-    return total_params, full_model_params, achieved_budget
+    layer_params = keep * (components["mlp_full_params"] * d_ratio)
+    total_params = layer_params.sum(dim=-1)
+    full_elastic_params = torch.full_like(total_params, components["full_elastic_params"])
+    achieved_budget = total_params / full_elastic_params
+    return total_params, full_elastic_params, achieved_budget
 
 
 def budget_hinge_loss(expected_params, target_params, reduction="mean"):
