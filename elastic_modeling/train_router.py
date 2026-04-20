@@ -19,6 +19,7 @@ from elastic_modeling.budget_loss import (
 )
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
 from elastic_modeling.gumbel_utils import (
+    router_probs_from_logits,
     resolve_router_controls,
     sample_router_outputs_batch_shared,
 )
@@ -391,8 +392,16 @@ def main():
         sampled_router_out = sample_router_outputs_batch_shared(
             router_out, tau=tau, hard=True, logit_scale=logit_scale
         )
+        router_prob_out = router_probs_from_logits(
+            router_out, tau=tau, logit_scale=logit_scale
+        )
         if not args.enable_layer_skip:
             sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
+                batch_size=args.batch_size,
+                num_layers=elastic_model.config.num_hidden_layers,
+                device=DEVICE,
+            )
+            router_prob_out["layer_keep_probs"] = build_always_keep_probs(
                 batch_size=args.batch_size,
                 num_layers=elastic_model.config.num_hidden_layers,
                 device=DEVICE,
@@ -428,8 +437,8 @@ def main():
                 config=elastic_model.config,
                 target_budget=target_budget,
                 d_choices=args.d_choices,
-                layer_keep_probs=sampled_router_out["layer_keep_probs"],
-                d_probs=sampled_router_out["d_probs"],
+                layer_keep_probs=router_prob_out["layer_keep_probs"],
+                d_probs=router_prob_out["d_probs"],
             )
             budget_loss = budget_stats["loss"]
             total_loss = router_loss + budget_loss

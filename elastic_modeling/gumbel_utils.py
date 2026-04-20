@@ -7,6 +7,16 @@ def _sanitize_logits(logits, clamp_value=10.0):
     return logits.clamp(min=-clamp_value, max=clamp_value)
 
 
+def logits_to_probs(logits, tau=1.0, logit_scale=1.0):
+    safe_logits = _sanitize_logits(logits)
+    tau = max(float(tau), 1e-6)
+    scaled_logits = safe_logits * float(logit_scale)
+    probs = F.softmax(scaled_logits / tau, dim=-1)
+    eps = 1e-6
+    probs = probs.clamp(min=eps)
+    return probs / probs.sum(dim=-1, keepdim=True)
+
+
 def sample_gumbel_softmax(logits, tau=1.0, hard=False, logit_scale=1.0):
     safe_logits = _sanitize_logits(logits)
     scaled_logits = safe_logits * float(logit_scale)
@@ -33,6 +43,16 @@ def sample_router_outputs(router_out, tau=1.0, hard=False, logit_scale=1.0):
         "h": router_out["h"],
         "d_probs": d_probs,
         "layer_keep_probs": layer_keep_probs,
+    }
+
+
+def router_probs_from_logits(router_out, tau=1.0, logit_scale=1.0):
+    return {
+        "h": router_out["h"],
+        "d_probs": logits_to_probs(router_out["d_logits"], tau=tau, logit_scale=logit_scale),
+        "layer_keep_probs": logits_to_probs(
+            router_out["layer_keep_logits"], tau=tau, logit_scale=logit_scale
+        ),
     }
 
 
