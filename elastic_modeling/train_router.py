@@ -16,8 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from elastic_modeling.budget_loss import (
     compute_budget_loss,
-    distillation_loss,
-    keep_ratio_penalty,
 )
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
 from elastic_modeling.gumbel_utils import (
@@ -302,6 +300,7 @@ def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
             "enable_layer_skip": args.enable_layer_skip,
             "logit_scale_start": args.logit_scale_start,
             "logit_scale_end": args.logit_scale_end,
+            "loss_objective": "sum_j(task_loss_j + budget_hinge_j)",
             "backbone_lr": args.backbone_lr,
             "router_lr": args.router_lr,
         },
@@ -320,13 +319,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    teacher_model = None
-    if args.distill_weight > 0.0:
-        teacher_model = AutoModelForCausalLM.from_pretrained(args.model_path).to(DEVICE)
-        teacher_model.eval()
-        for param in teacher_model.parameters():
-            param.requires_grad = False
 
     ds = load_from_disk(args.dataset_path)
     if args.max_examples > 0:
@@ -370,144 +362,129 @@ def main():
         batch = collate_batch(batch_examples, tokenizer.pad_token_id)
         batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
-        batch_budget_idx = sample_budget_indices(args.batch_size, len(args.budget_values), DEVICE)
-        target_budget = torch.tensor(
-            [args.budget_values[int(batch_budget_idx[0].item())]],
-            device=DEVICE,
-            dtype=torch.float32,
-        ).expand(args.batch_size)
         tau = linear_schedule_for_step(step - 1, args.steps, args.tau_start, args.tau_end)
         logit_scale = linear_schedule_for_step(
             step - 1, args.steps, args.logit_scale_start, args.logit_scale_end
         )
 
-        router_out = router(batch_budget_idx, device=DEVICE)
-        raise_or_checkpoint_non_finite(
-            step=step,
-            args=args,
-            elastic_model=elastic_model,
-            optimizer=optimizer,
-            named_tensors=[
-                ("router_out.d_logits", router_out["d_logits"]),
-                ("router_out.layer_keep_logits", router_out["layer_keep_logits"]),
-            ],
-            context="router forward",
-        )
-        # Use straight-through Gumbel-Softmax so the executed elastic model sees
-        # a single hard architectural choice, while gradients still flow through
-        # the underlying soft sample.
-        sampled_router_out = sample_router_outputs_batch_shared(
-            router_out, tau=tau, hard=True, logit_scale=logit_scale
-        )
-        if not args.enable_layer_skip:
-            sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
-                batch_size=args.batch_size,
-                num_layers=elastic_model.config.num_hidden_layers,
+        step_total_loss = 0.0
+        step_router_loss = 0.0
+        step_budget_loss = 0.0
+        budget_records = []
+
+        for budget_idx, budget_value in enumerate(args.budget_values):
+            batch_budget_idx = torch.full(
+                (args.batch_size,),
+                fill_value=budget_idx,
                 device=DEVICE,
+                dtype=torch.long,
             )
-        raise_or_checkpoint_non_finite(
-            step=step,
-            args=args,
-            elastic_model=elastic_model,
-            optimizer=optimizer,
-            named_tensors=[
-                ("sampled_router_out.d_probs", sampled_router_out["d_probs"]),
-                ("sampled_router_out.layer_keep_probs", sampled_router_out["layer_keep_probs"]),
-            ],
-            context="router sampling",
-        )
-
-        train_autocast = (
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-            if args.use_bf16 and DEVICE == "cuda"
-            else nullcontext()
-        )
-        with train_autocast:
-            outputs = elastic_model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-                d_probs=sampled_router_out["d_probs"],
-                layer_keep_probs=sampled_router_out["layer_keep_probs"],
+            target_budget = torch.full(
+                (args.batch_size,),
+                fill_value=budget_value,
+                device=DEVICE,
+                dtype=torch.float32,
             )
 
-            lm_loss = outputs.loss
-            budget_stats = compute_budget_loss(
-                config=elastic_model.config,
-                target_budget=target_budget,
-                d_choices=args.d_choices,
-                layer_keep_probs=sampled_router_out["layer_keep_probs"],
-                d_probs=sampled_router_out["d_probs"],
+            router_out = router(batch_budget_idx, device=DEVICE)
+            raise_or_checkpoint_non_finite(
+                step=step,
+                args=args,
+                elastic_model=elastic_model,
+                optimizer=optimizer,
+                named_tensors=[
+                    ("router_out.d_logits", router_out["d_logits"]),
+                    ("router_out.layer_keep_logits", router_out["layer_keep_logits"]),
+                ],
+                context=f"router forward (budget={budget_value:.3f})",
             )
-            keep_penalty = keep_ratio_penalty(
-                layer_keep_probs=sampled_router_out["layer_keep_probs"],
-                min_keep_ratio=args.min_keep_ratio,
+            sampled_router_out = sample_router_outputs_batch_shared(
+                router_out, tau=tau, hard=True, logit_scale=logit_scale
             )
-        raise_or_checkpoint_non_finite(
-            step=step,
-            args=args,
-            elastic_model=elastic_model,
-            optimizer=optimizer,
-            named_tensors=[
-                ("outputs.logits", outputs.logits),
-                ("lm_loss", lm_loss),
-                ("budget_loss", budget_stats["loss"]),
-                ("budget_achieved", budget_stats["achieved_budget"]),
-                ("keep_penalty", keep_penalty),
-            ],
-            context="elastic forward",
-        )
-
-        kd_loss = lm_loss.new_zeros(())
-        if teacher_model is not None:
-            with torch.no_grad():
-                teacher_outputs = teacher_model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
+            if not args.enable_layer_skip:
+                sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
+                    batch_size=args.batch_size,
+                    num_layers=elastic_model.config.num_hidden_layers,
+                    device=DEVICE,
                 )
-            kd_autocast = (
+            raise_or_checkpoint_non_finite(
+                step=step,
+                args=args,
+                elastic_model=elastic_model,
+                optimizer=optimizer,
+                named_tensors=[
+                    ("sampled_router_out.d_probs", sampled_router_out["d_probs"]),
+                    ("sampled_router_out.layer_keep_probs", sampled_router_out["layer_keep_probs"]),
+                ],
+                context=f"router sampling (budget={budget_value:.3f})",
+            )
+
+            train_autocast = (
                 torch.autocast(device_type="cuda", dtype=torch.bfloat16)
                 if args.use_bf16 and DEVICE == "cuda"
                 else nullcontext()
             )
-            with kd_autocast:
-                kd_loss = distillation_loss(
-                    student_logits=outputs.logits,
-                    teacher_logits=teacher_outputs.logits,
+            with train_autocast:
+                outputs = elastic_model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
                     labels=batch["labels"],
-                    temperature=args.temperature,
+                    d_probs=sampled_router_out["d_probs"],
+                    layer_keep_probs=sampled_router_out["layer_keep_probs"],
                 )
-        raise_or_checkpoint_non_finite(
-            step=step,
-            args=args,
-            elastic_model=elastic_model,
-            optimizer=optimizer,
-            named_tensors=[
-                ("kd_loss", kd_loss),
-            ],
-            context="distillation",
-        )
 
-        total_loss = (
-            args.ce_weight * lm_loss
-            + args.distill_weight * kd_loss
-            + args.budget_weight * budget_stats["loss"]
-            + args.keep_penalty_weight * keep_penalty
-        )
-        raise_or_checkpoint_non_finite(
-            step=step,
-            args=args,
-            elastic_model=elastic_model,
-            optimizer=optimizer,
-            named_tensors=[
-                ("total_loss", total_loss),
-            ],
-            context="loss aggregation",
-        )
-        scaled_loss = total_loss / args.grad_accum_steps
+                router_loss = outputs.loss
+                budget_stats = compute_budget_loss(
+                    config=elastic_model.config,
+                    target_budget=target_budget,
+                    d_choices=args.d_choices,
+                    layer_keep_probs=sampled_router_out["layer_keep_probs"],
+                    d_probs=sampled_router_out["d_probs"],
+                )
+                budget_loss = budget_stats["loss"]
+                budget_objective = router_loss + budget_loss
 
-        scaled_loss.backward()
+            raise_or_checkpoint_non_finite(
+                step=step,
+                args=args,
+                elastic_model=elastic_model,
+                optimizer=optimizer,
+                named_tensors=[
+                    ("outputs.logits", outputs.logits),
+                    ("router_loss", router_loss),
+                    ("budget_loss", budget_loss),
+                    ("budget_achieved", budget_stats["achieved_budget"]),
+                    ("budget_expected_params", budget_stats["expected_params"]),
+                ],
+                context=f"elastic forward (budget={budget_value:.3f})",
+            )
+            raise_or_checkpoint_non_finite(
+                step=step,
+                args=args,
+                elastic_model=elastic_model,
+                optimizer=optimizer,
+                named_tensors=[
+                    ("budget_objective", budget_objective),
+                ],
+                context=f"loss aggregation (budget={budget_value:.3f})",
+            )
+
+            (budget_objective / args.grad_accum_steps).backward()
+
+            resolved = resolve_router_controls(sampled_router_out, args.d_choices)
+            step_total_loss += float(budget_objective.item())
+            step_router_loss += float(router_loss.item())
+            step_budget_loss += float(budget_loss.item())
+            budget_records.append(
+                {
+                    "target": float(budget_value),
+                    "achieved": float(budget_stats["achieved_budget"].mean().item()),
+                    "keep": float(resolved["layer_keep"].float().mean().item()),
+                    "width": float(
+                        (resolved["d_keep"].float() / float(intermediate_size)).mean().item()
+                    ),
+                }
+            )
 
         should_step = step % args.grad_accum_steps == 0 or step == args.steps
         if should_step:
@@ -532,29 +509,27 @@ def main():
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
-        running_loss += float(total_loss.item())
+        running_loss += step_total_loss
 
         if step % args.log_every == 0 or step == 1:
-            resolved = resolve_router_controls(sampled_router_out, args.d_choices)
-            mean_kept_layers = resolved["layer_keep"].float().mean().item()
-            mean_width_ratio = (
-                resolved["d_keep"].float() / float(intermediate_size)
-            ).mean().item()
+            router_loss_avg = step_router_loss / max(1, len(args.budget_values))
+            budget_loss_avg = step_budget_loss / max(1, len(args.budget_values))
+            achieved_summary = "/".join(f"{record['achieved']:.3f}" for record in budget_records)
+            width_summary = "/".join(f"{record['width']:.3f}" for record in budget_records)
+            keep_summary = "/".join(f"{record['keep']:.3f}" for record in budget_records)
             backbone_lr = optimizer.param_groups[0]["lr"] if optimizer.param_groups else 0.0
             router_lr = optimizer.param_groups[-1]["lr"] if optimizer.param_groups else 0.0
             print(
                 f"step={step:04d} "
                 f"k={logit_scale:.3f} "
                 f"tau={tau:.3f} "
-                f"total={total_loss.item():.4f} "
-                f"lm={lm_loss.item():.4f} "
-                f"kd={kd_loss.item():.4f} "
-                f"budget={budget_stats['loss'].item():.4f} "
-                f"keep_pen={keep_penalty.item():.4f} "
-                f"target={target_budget[0].item():.3f} "
-                f"achieved={budget_stats['achieved_budget'].mean().item():.3f} "
-                f"keep={mean_kept_layers:.3f} "
-                f"width={mean_width_ratio:.3f} "
+                f"total={step_total_loss:.4f} "
+                f"router_avg={router_loss_avg:.4f} "
+                f"budget_avg={budget_loss_avg:.4f} "
+                f"achieved={achieved_summary} "
+                f"keep={keep_summary} "
+                f"width={width_summary} "
+                f"budgets={len(args.budget_values)} "
                 f"eff_batch={effective_batch_size} "
                 f"accum={step % args.grad_accum_steps or args.grad_accum_steps}/{args.grad_accum_steps} "
                 f"backbone_lr={backbone_lr:.2e} "
