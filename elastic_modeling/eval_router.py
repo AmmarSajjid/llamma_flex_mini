@@ -49,6 +49,12 @@ def parse_args():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-examples", type=int, default=0)
     parser.add_argument(
+        "--logit-scale",
+        type=float,
+        default=None,
+        help="Override the router logit scale k used before Gumbel-Softmax.",
+    )
+    parser.add_argument(
         "--budget-values",
         type=float,
         nargs="+",
@@ -74,6 +80,7 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
     d_choices = [int(choice) for choice in checkpoint["d_choices"]]
     budget_values = checkpoint["budget_values"]
     enable_layer_skip = checkpoint.get("enable_layer_skip", False)
+    checkpoint_logit_scale = float(checkpoint.get("logit_scale_end", 1.0))
 
     if "router_d.0.weight" in router_state:
         first_router_weight = router_state["router_d.0.weight"]
@@ -88,7 +95,7 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
         hidden_dim=hidden_dim,
     )
     router.load_state_dict(router_state)
-    return checkpoint, router, d_choices, budget_values, enable_layer_skip
+    return checkpoint, router, d_choices, budget_values, enable_layer_skip, checkpoint_logit_scale
 
 
 def build_always_keep(batch_size, num_layers, device):
@@ -106,6 +113,7 @@ def evaluate_fixed_budget(
     d_choices,
     batch_size,
     enable_layer_skip,
+    logit_scale,
 ):
     model.eval()
     router.eval()
@@ -139,7 +147,7 @@ def evaluate_fixed_budget(
 
         router_out = router(budget_idx_tensor, device=DEVICE)
         sampled_router_out = sample_router_outputs_batch_shared(
-            router_out, tau=1.0, hard=True
+            router_out, tau=1.0, hard=True, logit_scale=logit_scale
         )
         resolved = resolve_router_controls(sampled_router_out, d_choices)
         if not enable_layer_skip:
@@ -287,10 +295,11 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
 
 def main():
     args = parse_args()
-    checkpoint, router, d_choices, checkpoint_budget_values, enable_layer_skip = load_router_from_checkpoint(
+    checkpoint, router, d_choices, checkpoint_budget_values, enable_layer_skip, checkpoint_logit_scale = load_router_from_checkpoint(
         args.checkpoint_path,
         AutoModelForCausalLM.from_pretrained(args.model_path).config,
     )
+    logit_scale = args.logit_scale if args.logit_scale is not None else checkpoint_logit_scale
 
     budget_values = args.budget_values if args.budget_values is not None else checkpoint_budget_values
 
@@ -299,6 +308,7 @@ def main():
     print(f"Checkpoint step: {checkpoint.get('step', 'unknown')}")
     print(f"d_choices: {d_choices}")
     print(f"budgets: {budget_values}")
+    print(f"logit_scale(k): {logit_scale}")
 
     teacher_model = AutoModelForCausalLM.from_pretrained(args.model_path).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
@@ -339,6 +349,7 @@ def main():
             d_choices=d_choices,
             batch_size=args.batch_size,
             enable_layer_skip=enable_layer_skip,
+            logit_scale=logit_scale,
         )
         elastic_metrics.append(metrics)
         print(

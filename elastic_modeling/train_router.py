@@ -58,6 +58,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tau-start", type=float, default=1.0)
     parser.add_argument("--tau-end", type=float, default=0.2)
+    parser.add_argument("--logit-scale-start", type=float, default=1.0)
+    parser.add_argument("--logit-scale-end", type=float, default=1.0)
     parser.add_argument("--distill-weight", type=float, default=0.0)
     parser.add_argument("--budget-weight", type=float, default=1.0)
     parser.add_argument("--keep-penalty-weight", type=float, default=1.0)
@@ -127,7 +129,7 @@ def cycle_tokenized_examples(tokenized_ds):
             yield tokenized_ds[idx]
 
 
-def tau_for_step(step, total_steps, start, end):
+def linear_schedule_for_step(step, total_steps, start, end):
     if total_steps <= 1:
         return end
     progress = step / float(total_steps - 1)
@@ -298,6 +300,8 @@ def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
             "use_bf16": args.use_bf16,
             "gradient_checkpointing": args.gradient_checkpointing,
             "enable_layer_skip": args.enable_layer_skip,
+            "logit_scale_start": args.logit_scale_start,
+            "logit_scale_end": args.logit_scale_end,
             "backbone_lr": args.backbone_lr,
             "router_lr": args.router_lr,
         },
@@ -372,7 +376,10 @@ def main():
             device=DEVICE,
             dtype=torch.float32,
         ).expand(args.batch_size)
-        tau = tau_for_step(step - 1, args.steps, args.tau_start, args.tau_end)
+        tau = linear_schedule_for_step(step - 1, args.steps, args.tau_start, args.tau_end)
+        logit_scale = linear_schedule_for_step(
+            step - 1, args.steps, args.logit_scale_start, args.logit_scale_end
+        )
 
         router_out = router(batch_budget_idx, device=DEVICE)
         raise_or_checkpoint_non_finite(
@@ -387,7 +394,7 @@ def main():
             context="router forward",
         )
         sampled_router_out = sample_router_outputs_batch_shared(
-            router_out, tau=tau, hard=False
+            router_out, tau=tau, hard=False, logit_scale=logit_scale
         )
         if not args.enable_layer_skip:
             sampled_router_out["layer_keep_probs"] = build_always_keep_probs(
@@ -534,6 +541,7 @@ def main():
             router_lr = optimizer.param_groups[-1]["lr"] if optimizer.param_groups else 0.0
             print(
                 f"step={step:04d} "
+                f"k={logit_scale:.3f} "
                 f"tau={tau:.3f} "
                 f"total={total_loss.item():.4f} "
                 f"lm={lm_loss.item():.4f} "

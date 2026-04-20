@@ -118,6 +118,7 @@ class ElasticQwen2Model(nn.Module):
         layer_keep_probs=None,
         d_probs=None,
         tau=1.0,
+        logit_scale=1.0,
         hard=False,
     ):
         budget_idx = self._normalize_budget_idx(budget_idx, batch_size, device)
@@ -132,7 +133,7 @@ class ElasticQwen2Model(nn.Module):
         ):
             router_out = self.router(budget_idx, device=device)
             sampled_out = sample_router_outputs_batch_shared(
-                router_out, tau=tau, hard=hard
+                router_out, tau=tau, hard=hard, logit_scale=logit_scale
             )
             if hard:
                 resolved = resolve_router_controls(sampled_out, self.d_choices)
@@ -182,6 +183,7 @@ class ElasticQwen2Model(nn.Module):
         layer_keep_probs: torch.Tensor | None = None,
         d_probs: torch.Tensor | None = None,
         tau: float = 1.0,
+        logit_scale: float = 1.0,
         hard: bool = False,
         **kwargs,
     ) -> BaseModelOutputWithPast:
@@ -226,6 +228,7 @@ class ElasticQwen2Model(nn.Module):
             layer_keep_probs=layer_keep_probs,
             d_probs=d_probs,
             tau=tau,
+            logit_scale=logit_scale,
             hard=hard,
         )
 
@@ -289,6 +292,7 @@ class ElasticQwen2ForCausalLM(nn.Module):
         layer_keep_probs: torch.Tensor | None = None,
         d_probs: torch.Tensor | None = None,
         tau: float = 1.0,
+        logit_scale: float = 1.0,
         hard: bool = False,
         **kwargs,
     ) -> CausalLMOutputWithPast:
@@ -305,6 +309,7 @@ class ElasticQwen2ForCausalLM(nn.Module):
             layer_keep_probs=layer_keep_probs,
             d_probs=d_probs,
             tau=tau,
+            logit_scale=logit_scale,
             hard=hard,
             **kwargs,
         )

@@ -7,9 +7,10 @@ def _sanitize_logits(logits, clamp_value=10.0):
     return logits.clamp(min=-clamp_value, max=clamp_value)
 
 
-def sample_gumbel_softmax(logits, tau=1.0, hard=False):
+def sample_gumbel_softmax(logits, tau=1.0, hard=False, logit_scale=1.0):
     safe_logits = _sanitize_logits(logits)
-    samples = F.gumbel_softmax(safe_logits, tau=tau, hard=hard, dim=-1)
+    scaled_logits = safe_logits * float(logit_scale)
+    samples = F.gumbel_softmax(scaled_logits, tau=tau, hard=hard, dim=-1)
     if hard:
         return samples
 
@@ -20,10 +21,12 @@ def sample_gumbel_softmax(logits, tau=1.0, hard=False):
     return samples / samples.sum(dim=-1, keepdim=True)
 
 
-def sample_router_outputs(router_out, tau=1.0, hard=False):
-    d_probs = sample_gumbel_softmax(router_out["d_logits"], tau=tau, hard=hard)
+def sample_router_outputs(router_out, tau=1.0, hard=False, logit_scale=1.0):
+    d_probs = sample_gumbel_softmax(
+        router_out["d_logits"], tau=tau, hard=hard, logit_scale=logit_scale
+    )
     layer_keep_probs = sample_gumbel_softmax(
-        router_out["layer_keep_logits"], tau=tau, hard=hard
+        router_out["layer_keep_logits"], tau=tau, hard=hard, logit_scale=logit_scale
     )
 
     return {
@@ -33,14 +36,14 @@ def sample_router_outputs(router_out, tau=1.0, hard=False):
     }
 
 
-def sample_router_outputs_batch_shared(router_out, tau=1.0, hard=False):
+def sample_router_outputs_batch_shared(router_out, tau=1.0, hard=False, logit_scale=1.0):
     batch_size = router_out["d_logits"].shape[0]
 
     shared_d_probs = sample_gumbel_softmax(
-        router_out["d_logits"][:1], tau=tau, hard=hard
+        router_out["d_logits"][:1], tau=tau, hard=hard, logit_scale=logit_scale
     )
     shared_layer_keep_probs = sample_gumbel_softmax(
-        router_out["layer_keep_logits"][:1], tau=tau, hard=hard
+        router_out["layer_keep_logits"][:1], tau=tau, hard=hard, logit_scale=logit_scale
     )
 
     d_probs = shared_d_probs.expand(batch_size, -1, -1)
