@@ -2,25 +2,102 @@ import torch
 import torch.nn.functional as F
 
 
-def get_parameter_count_components(config):
+MLP_ONLY_ACCOUNTING = "mlp_only"
+BLOCK_PARAMS_ACCOUNTING = "block_params"
+VALID_ACCOUNTING_MODES = {MLP_ONLY_ACCOUNTING, BLOCK_PARAMS_ACCOUNTING}
+
+
+def _validate_accounting_mode(accounting_mode):
+    if accounting_mode not in VALID_ACCOUNTING_MODES:
+        raise ValueError(
+            f"accounting_mode must be one of {sorted(VALID_ACCOUNTING_MODES)}, got {accounting_mode!r}"
+        )
+    return accounting_mode
+
+
+def resolve_budget_accounting_mode(enable_layer_skip):
+    return BLOCK_PARAMS_ACCOUNTING if enable_layer_skip else MLP_ONLY_ACCOUNTING
+
+
+def build_parameter_count_components(config, layer=None, accounting_mode=MLP_ONLY_ACCOUNTING):
+    accounting_mode = _validate_accounting_mode(accounting_mode)
+
     hidden_size = int(config.hidden_size)
     intermediate_size = int(config.intermediate_size)
     num_layers = int(config.num_hidden_layers)
 
-    gate_proj_params = hidden_size * intermediate_size
-    up_proj_params = hidden_size * intermediate_size
-    down_proj_params = intermediate_size * hidden_size
-    mlp_full_params = gate_proj_params + up_proj_params + down_proj_params
-    full_elastic_params = num_layers * mlp_full_params
+    if layer is not None:
+        mlp_full_params = float(sum(param.numel() for param in layer.mlp.parameters()))
+        fixed_block_params = float(
+            sum(param.numel() for name, param in layer.named_parameters() if not name.startswith("mlp."))
+        )
+    else:
+        gate_proj_params = hidden_size * intermediate_size
+        up_proj_params = hidden_size * intermediate_size
+        down_proj_params = intermediate_size * hidden_size
+        mlp_full_params = float(gate_proj_params + up_proj_params + down_proj_params)
+        fixed_block_params = 0.0
+
+    if accounting_mode == BLOCK_PARAMS_ACCOUNTING and layer is None:
+        raise ValueError("layer is required to build block-parameter accounting components")
+
+    full_layer_params = fixed_block_params + mlp_full_params
+    if accounting_mode == BLOCK_PARAMS_ACCOUNTING:
+        full_elastic_params = num_layers * full_layer_params
+    else:
+        full_elastic_params = num_layers * mlp_full_params
 
     return {
-        "mlp_full_params": float(mlp_full_params),
+        "accounting_mode": accounting_mode,
+        "hidden_size": float(hidden_size),
+        "intermediate_size": float(intermediate_size),
         "num_layers": float(num_layers),
+        "fixed_block_params": float(fixed_block_params),
+        "mlp_full_params": float(mlp_full_params),
+        "full_layer_params": float(full_layer_params),
         "full_elastic_params": float(full_elastic_params),
     }
 
 
-def expected_parameter_count_from_probs(layer_keep_probs, d_probs, d_choices, config):
+def _resolve_parameter_count_components(
+    config,
+    parameter_count_components=None,
+    accounting_mode=MLP_ONLY_ACCOUNTING,
+):
+    accounting_mode = _validate_accounting_mode(accounting_mode)
+    if parameter_count_components is None:
+        return build_parameter_count_components(config, accounting_mode=accounting_mode)
+
+    components = dict(parameter_count_components)
+    components_mode = _validate_accounting_mode(components.get("accounting_mode", accounting_mode))
+    if components_mode != accounting_mode:
+        raise ValueError(
+            f"parameter_count_components mode {components_mode!r} does not match accounting_mode {accounting_mode!r}"
+        )
+
+    required_keys = {
+        "accounting_mode",
+        "fixed_block_params",
+        "mlp_full_params",
+        "full_layer_params",
+        "full_elastic_params",
+        "num_layers",
+    }
+    missing_keys = sorted(required_keys.difference(components))
+    if missing_keys:
+        raise ValueError(f"parameter_count_components missing keys: {missing_keys}")
+
+    return components
+
+
+def expected_parameter_count_from_probs(
+    layer_keep_probs,
+    d_probs,
+    d_choices,
+    config,
+    accounting_mode=MLP_ONLY_ACCOUNTING,
+    parameter_count_components=None,
+):
     if layer_keep_probs.dim() != 3 or layer_keep_probs.shape[-1] != 2:
         raise ValueError("layer_keep_probs must have shape [batch, layers, 2]")
     if d_probs.dim() != 3:
@@ -28,13 +105,22 @@ def expected_parameter_count_from_probs(layer_keep_probs, d_probs, d_choices, co
     if layer_keep_probs.shape[:2] != d_probs.shape[:2]:
         raise ValueError("layer_keep_probs and d_probs must agree on [batch, layers]")
 
-    components = get_parameter_count_components(config)
+    components = _resolve_parameter_count_components(
+        config=config,
+        parameter_count_components=parameter_count_components,
+        accounting_mode=accounting_mode,
+    )
     d_choice_tensor = torch.as_tensor(d_choices, device=d_probs.device, dtype=d_probs.dtype)
     d_ratios = d_choice_tensor / float(config.intermediate_size)
     expected_d_ratio = (d_probs * d_ratios.view(1, 1, -1)).sum(dim=-1)
 
-    keep_prob = layer_keep_probs[..., 1]
-    expected_layer_params = keep_prob * (components["mlp_full_params"] * expected_d_ratio)
+    if components["accounting_mode"] == BLOCK_PARAMS_ACCOUNTING:
+        keep_prob = layer_keep_probs[..., 1]
+        expected_layer_params = keep_prob * (
+            components["fixed_block_params"] + components["mlp_full_params"] * expected_d_ratio
+        )
+    else:
+        expected_layer_params = components["mlp_full_params"] * expected_d_ratio
     expected_total_params = expected_layer_params.sum(dim=-1)
 
     full_elastic_params = torch.full_like(expected_total_params, components["full_elastic_params"])
@@ -42,14 +128,27 @@ def expected_parameter_count_from_probs(layer_keep_probs, d_probs, d_choices, co
     return expected_total_params, full_elastic_params, achieved_budget
 
 
-def concrete_parameter_count_from_controls(layer_keep, d_keep, config):
+def concrete_parameter_count_from_controls(
+    layer_keep,
+    d_keep,
+    config,
+    accounting_mode=MLP_ONLY_ACCOUNTING,
+    parameter_count_components=None,
+):
     if layer_keep.dim() != 2 or d_keep.dim() != 2:
         raise ValueError("layer_keep and d_keep must have shape [batch, layers]")
 
-    components = get_parameter_count_components(config)
-    keep = layer_keep.to(dtype=torch.float32)
+    components = _resolve_parameter_count_components(
+        config=config,
+        parameter_count_components=parameter_count_components,
+        accounting_mode=accounting_mode,
+    )
     d_ratio = d_keep.to(dtype=torch.float32) / float(config.intermediate_size)
-    layer_params = keep * (components["mlp_full_params"] * d_ratio)
+    if components["accounting_mode"] == BLOCK_PARAMS_ACCOUNTING:
+        keep = layer_keep.to(dtype=torch.float32)
+        layer_params = keep * (components["fixed_block_params"] + components["mlp_full_params"] * d_ratio)
+    else:
+        layer_params = components["mlp_full_params"] * d_ratio
     total_params = layer_params.sum(dim=-1)
     full_elastic_params = torch.full_like(total_params, components["full_elastic_params"])
     achieved_budget = total_params / full_elastic_params
@@ -74,6 +173,8 @@ def compute_budget_loss(
     d_probs=None,
     layer_keep=None,
     d_keep=None,
+    accounting_mode=MLP_ONLY_ACCOUNTING,
+    parameter_count_components=None,
 ):
     if layer_keep_probs is not None and d_probs is not None:
         expected_params, full_params, achieved_budget = expected_parameter_count_from_probs(
@@ -81,12 +182,16 @@ def compute_budget_loss(
             d_probs=d_probs,
             d_choices=d_choices,
             config=config,
+            accounting_mode=accounting_mode,
+            parameter_count_components=parameter_count_components,
         )
     elif layer_keep is not None and d_keep is not None:
         expected_params, full_params, achieved_budget = concrete_parameter_count_from_controls(
             layer_keep=layer_keep,
             d_keep=d_keep,
             config=config,
+            accounting_mode=accounting_mode,
+            parameter_count_components=parameter_count_components,
         )
     else:
         raise ValueError(
@@ -106,6 +211,7 @@ def compute_budget_loss(
     loss = budget_hinge_loss(expected_params, target_params)
     return {
         "loss": loss,
+        "accounting_mode": accounting_mode,
         "achieved_budget": achieved_budget,
         "target_budget": target_budget,
         "expected_params": expected_params,

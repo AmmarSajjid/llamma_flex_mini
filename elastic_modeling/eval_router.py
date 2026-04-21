@@ -12,7 +12,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from elastic_modeling.budget_loss import compute_budget_loss
+from elastic_modeling.budget_loss import (
+    build_parameter_count_components,
+    compute_budget_loss,
+    resolve_budget_accounting_mode,
+)
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
 from elastic_modeling.gumbel_utils import (
     resolve_router_controls,
@@ -80,6 +84,10 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
     d_choices = [int(choice) for choice in checkpoint["d_choices"]]
     budget_values = checkpoint["budget_values"]
     enable_layer_skip = checkpoint.get("enable_layer_skip", False)
+    budget_accounting_mode = checkpoint.get(
+        "budget_accounting_mode",
+        resolve_budget_accounting_mode(enable_layer_skip),
+    )
     checkpoint_logit_scale = float(checkpoint.get("logit_scale_end", 1.0))
 
     if "router_d.0.weight" in router_state:
@@ -95,7 +103,15 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
         hidden_dim=hidden_dim,
     )
     router.load_state_dict(router_state)
-    return checkpoint, router, d_choices, budget_values, enable_layer_skip, checkpoint_logit_scale
+    return (
+        checkpoint,
+        router,
+        d_choices,
+        budget_values,
+        enable_layer_skip,
+        budget_accounting_mode,
+        checkpoint_logit_scale,
+    )
 
 
 def build_always_keep(batch_size, num_layers, device):
@@ -113,6 +129,8 @@ def evaluate_fixed_budget(
     d_choices,
     batch_size,
     enable_layer_skip,
+    budget_accounting_mode,
+    parameter_count_components,
     logit_scale,
 ):
     model.eval()
@@ -175,6 +193,8 @@ def evaluate_fixed_budget(
             d_choices=d_choices,
             layer_keep=resolved["layer_keep"],
             d_keep=resolved["d_keep"],
+            accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
         )
 
         total_achieved_budget += budget_stats["achieved_budget"].mean().item()
@@ -195,6 +215,7 @@ def evaluate_fixed_budget(
         "achieved_budget": total_achieved_budget / max(1, num_batches),
         "keep_ratio": total_keep_ratio / max(1, num_batches),
         "width_ratio": total_width_ratio / max(1, num_batches),
+        "budget_accounting_mode": budget_accounting_mode,
     }
 
 
@@ -229,7 +250,15 @@ def evaluate_base_model(model, tokenized_ds, tokenizer, batch_size):
     }
 
 
-def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_step, d_choices, dataset_path, base_metrics=None):
+def write_metrics_csv(
+    csv_path,
+    elastic_metrics,
+    checkpoint_path,
+    checkpoint_step,
+    d_choices,
+    dataset_path,
+    base_metrics=None,
+):
     csv_path = Path(csv_path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -239,6 +268,7 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
         "checkpoint_step",
         "dataset_path",
         "d_choices",
+        "budget_accounting_mode",
         "target_budget",
         "achieved_budget",
         "keep_ratio",
@@ -262,6 +292,7 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
                     "checkpoint_step": checkpoint_step,
                     "dataset_path": str(dataset_path),
                     "d_choices": d_choices_str,
+                    "budget_accounting_mode": metrics["budget_accounting_mode"],
                     "target_budget": metrics["budget"],
                     "achieved_budget": metrics["achieved_budget"],
                     "keep_ratio": metrics["keep_ratio"],
@@ -281,6 +312,7 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
                     "checkpoint_step": checkpoint_step,
                     "dataset_path": str(dataset_path),
                     "d_choices": d_choices_str,
+                    "budget_accounting_mode": elastic_metrics[0]["budget_accounting_mode"] if elastic_metrics else "",
                     "target_budget": "",
                     "achieved_budget": "",
                     "keep_ratio": "",
@@ -295,11 +327,25 @@ def write_metrics_csv(csv_path, elastic_metrics, checkpoint_path, checkpoint_ste
 
 def main():
     args = parse_args()
-    checkpoint, router, d_choices, checkpoint_budget_values, enable_layer_skip, checkpoint_logit_scale = load_router_from_checkpoint(
+    teacher_model = AutoModelForCausalLM.from_pretrained(args.model_path).to(DEVICE)
+    (
+        checkpoint,
+        router,
+        d_choices,
+        checkpoint_budget_values,
+        enable_layer_skip,
+        budget_accounting_mode,
+        checkpoint_logit_scale,
+    ) = load_router_from_checkpoint(
         args.checkpoint_path,
-        AutoModelForCausalLM.from_pretrained(args.model_path).config,
+        teacher_model.config,
     )
     logit_scale = args.logit_scale if args.logit_scale is not None else checkpoint_logit_scale
+    parameter_count_components = build_parameter_count_components(
+        config=teacher_model.config,
+        layer=teacher_model.model.layers[0],
+        accounting_mode=budget_accounting_mode,
+    )
 
     budget_values = args.budget_values if args.budget_values is not None else checkpoint_budget_values
 
@@ -308,9 +354,8 @@ def main():
     print(f"Checkpoint step: {checkpoint.get('step', 'unknown')}")
     print(f"d_choices: {d_choices}")
     print(f"budgets: {budget_values}")
+    print(f"budget_accounting_mode: {budget_accounting_mode}")
     print(f"logit_scale(k): {logit_scale}")
-
-    teacher_model = AutoModelForCausalLM.from_pretrained(args.model_path).to(DEVICE)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -349,6 +394,8 @@ def main():
             d_choices=d_choices,
             batch_size=args.batch_size,
             enable_layer_skip=enable_layer_skip,
+            budget_accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
             logit_scale=logit_scale,
         )
         elastic_metrics.append(metrics)

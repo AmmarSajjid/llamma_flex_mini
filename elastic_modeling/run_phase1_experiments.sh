@@ -18,8 +18,14 @@ SHORT_GRAD_ACCUM="${SHORT_GRAD_ACCUM:-2}"
 SHORT_EVAL_MAX_EXAMPLES="${SHORT_EVAL_MAX_EXAMPLES:-5000}"
 SHORT_LOGIT_SCALE_START="${SHORT_LOGIT_SCALE_START:-1.0}"
 SHORT_LOGIT_SCALE_END="${SHORT_LOGIT_SCALE_END:-4.0}"
+ENABLE_LAYER_SKIP="${ENABLE_LAYER_SKIP:-1}"
 
 SHORT_STEP_TAG="$(printf "%06d" "$SHORT_STEPS")"
+
+TRAIN_EXTRA_ARGS=()
+if [[ "$ENABLE_LAYER_SKIP" == "1" ]]; then
+  TRAIN_EXTRA_ARGS+=(--enable-layer-skip)
+fi
 
 if [[ "$RUN_SMOKE_RUN" == "1" ]]; then
   echo "Phase 1 smoke run"
@@ -35,7 +41,8 @@ if [[ "$RUN_SMOKE_RUN" == "1" ]]; then
     --save-failure-state \
     --skip-non-finite-steps \
     --save-every 100 \
-    --log-every 10
+    --log-every 10 \
+    "${TRAIN_EXTRA_ARGS[@]}"
 
   echo
   echo "Evaluate latest smoke checkpoint"
@@ -60,7 +67,8 @@ python elastic_modeling/train_router.py \
   --save-failure-state \
   --skip-non-finite-steps \
   --save-every 250 \
-  --log-every 25
+  --log-every 25 \
+  "${TRAIN_EXTRA_ARGS[@]}"
 
 echo
 echo "Evaluate short-run checkpoint"

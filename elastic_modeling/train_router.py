@@ -15,7 +15,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from elastic_modeling.budget_loss import (
+    build_parameter_count_components,
     compute_budget_loss,
+    resolve_budget_accounting_mode,
 )
 from elastic_modeling.elastic_qwen import ElasticQwen2ForCausalLM
 from elastic_modeling.gumbel_utils import (
@@ -222,6 +224,8 @@ def raise_or_checkpoint_non_finite(
     args,
     elastic_model,
     optimizer,
+    budget_accounting_mode,
+    parameter_count_components,
     named_tensors,
     context,
     raise_if_requested=True,
@@ -244,6 +248,9 @@ def raise_or_checkpoint_non_finite(
                 "optimizer_state_dict": optimizer.state_dict(),
                 "budget_values": list(args.budget_values),
                 "d_choices": list(args.d_choices),
+                "enable_layer_skip": args.enable_layer_skip,
+                "budget_accounting_mode": budget_accounting_mode,
+                "parameter_count_components": dict(parameter_count_components),
             },
             failure_path,
         )
@@ -252,7 +259,14 @@ def raise_or_checkpoint_non_finite(
         raise RuntimeError(f"Non-finite tensor detected at step {step} during {context}: {bad_name}")
 
 
-def sanitize_or_skip_non_finite_grads(step, args, elastic_model, optimizer):
+def sanitize_or_skip_non_finite_grads(
+    step,
+    args,
+    elastic_model,
+    optimizer,
+    budget_accounting_mode,
+    parameter_count_components,
+):
     bad_name = None
     for name, param in elastic_model.named_parameters():
         if not param.requires_grad or param.grad is None:
@@ -269,6 +283,8 @@ def sanitize_or_skip_non_finite_grads(step, args, elastic_model, optimizer):
         args=args,
         elastic_model=elastic_model,
         optimizer=optimizer,
+        budget_accounting_mode=budget_accounting_mode,
+        parameter_count_components=parameter_count_components,
         named_tensors=[(f"grad::{bad_name}", dict(elastic_model.named_parameters())[bad_name].grad)],
         context="backward",
         raise_if_requested=False,
@@ -283,7 +299,15 @@ def sanitize_or_skip_non_finite_grads(step, args, elastic_model, optimizer):
     return True, bad_name
 
 
-def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
+def save_checkpoint(
+    save_dir,
+    step,
+    elastic_model,
+    optimizer,
+    args,
+    budget_accounting_mode,
+    parameter_count_components,
+):
     os.makedirs(save_dir, exist_ok=True)
     checkpoint_path = Path(save_dir) / f"router_step_{step:06d}.pt"
     torch.save(
@@ -299,11 +323,14 @@ def save_checkpoint(save_dir, step, elastic_model, optimizer, args):
             "use_bf16": args.use_bf16,
             "gradient_checkpointing": args.gradient_checkpointing,
             "enable_layer_skip": args.enable_layer_skip,
+            "budget_accounting_mode": budget_accounting_mode,
+            "parameter_count_components": dict(parameter_count_components),
             "logit_scale_start": args.logit_scale_start,
             "logit_scale_end": args.logit_scale_end,
-            "loss_objective": "sample_one_budget_per_batch(task_loss + budget_hinge)",
+            "loss_objective": "sample_one_budget_per_batch(task_loss + budget_weight * budget_hinge)",
             "backbone_lr": args.backbone_lr,
             "router_lr": args.router_lr,
+            "budget_weight": args.budget_weight,
         },
         checkpoint_path,
     )
@@ -331,6 +358,13 @@ def main():
     if args.d_choices is None:
         args.d_choices = get_default_d_choices(intermediate_size)
     args.d_choices = sorted({int(choice) for choice in args.d_choices})
+    budget_accounting_mode = resolve_budget_accounting_mode(args.enable_layer_skip)
+    parameter_count_components = build_parameter_count_components(
+        config=trainable_base_model.config,
+        layer=trainable_base_model.model.layers[0],
+        accounting_mode=budget_accounting_mode,
+    )
+    print(f"Budget accounting mode: {budget_accounting_mode}")
 
     router = BudgetRouter(
         budget_values=args.budget_values,
@@ -383,6 +417,8 @@ def main():
             args=args,
             elastic_model=elastic_model,
             optimizer=optimizer,
+            budget_accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
             named_tensors=[
                 ("router_out.d_logits", router_out["d_logits"]),
                 ("router_out.layer_keep_logits", router_out["layer_keep_logits"]),
@@ -411,6 +447,8 @@ def main():
             args=args,
             elastic_model=elastic_model,
             optimizer=optimizer,
+            budget_accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
             named_tensors=[
                 ("sampled_router_out.d_probs", sampled_router_out["d_probs"]),
                 ("sampled_router_out.layer_keep_probs", sampled_router_out["layer_keep_probs"]),
@@ -439,15 +477,19 @@ def main():
                 d_choices=args.d_choices,
                 layer_keep_probs=router_prob_out["layer_keep_probs"],
                 d_probs=router_prob_out["d_probs"],
+                accounting_mode=budget_accounting_mode,
+                parameter_count_components=parameter_count_components,
             )
             budget_loss = budget_stats["loss"]
-            total_loss = router_loss + budget_loss
+            total_loss = router_loss + args.budget_weight * budget_loss
 
         raise_or_checkpoint_non_finite(
             step=step,
             args=args,
             elastic_model=elastic_model,
             optimizer=optimizer,
+            budget_accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
             named_tensors=[
                 ("outputs.logits", outputs.logits),
                 ("router_loss", router_loss),
@@ -462,6 +504,8 @@ def main():
             args=args,
             elastic_model=elastic_model,
             optimizer=optimizer,
+            budget_accounting_mode=budget_accounting_mode,
+            parameter_count_components=parameter_count_components,
             named_tensors=[
                 ("total_loss", total_loss),
             ],
@@ -477,6 +521,8 @@ def main():
                 args=args,
                 elastic_model=elastic_model,
                 optimizer=optimizer,
+                budget_accounting_mode=budget_accounting_mode,
+                parameter_count_components=parameter_count_components,
             )
             if skipped_step:
                 print(
@@ -521,7 +567,15 @@ def main():
             )
 
         if step % args.save_every == 0 or step == args.steps:
-            save_checkpoint(args.save_dir, step, elastic_model, optimizer, args)
+            save_checkpoint(
+                args.save_dir,
+                step,
+                elastic_model,
+                optimizer,
+                args,
+                budget_accounting_mode,
+                parameter_count_components,
+            )
 
     average_loss = running_loss / max(1, args.steps)
     print(f"Training complete. Average total loss: {average_loss:.4f}")
