@@ -9,3 +9,5 @@ modeling_qwen2.py
 exp.ipynb
 
 checkpoints
+
+*.pdf
