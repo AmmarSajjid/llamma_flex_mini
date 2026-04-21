@@ -13,10 +13,20 @@ from elastic_modeling.gumbel_utils import (
     resolve_router_controls,
     sample_router_outputs_batch_shared,
 )
+from elastic_modeling.policy_modulation import PolicyAwareModulator
 
 
 class ElasticQwen2Model(nn.Module):
-    def __init__(self, base_model, d_choices, router=None):
+    def __init__(
+        self,
+        base_model,
+        d_choices,
+        router=None,
+        budget_values=None,
+        enable_policy_modulation=False,
+        policy_modulation_embed_dim=16,
+        policy_modulation_hidden_dim=128,
+    ):
         super().__init__()
         self.config = base_model.config
         self.padding_idx = base_model.padding_idx
@@ -29,6 +39,30 @@ class ElasticQwen2Model(nn.Module):
         self.router = router
         self.d_choices = sorted({int(d) for d in d_choices})
         self.default_d_keep = base_model.layers[0].mlp.gate_proj.out_features
+        self.enable_policy_modulation = bool(enable_policy_modulation)
+        self.policy_modulation_embed_dim = int(policy_modulation_embed_dim)
+        self.policy_modulation_hidden_dim = int(policy_modulation_hidden_dim)
+        budget_values = list(budget_values if budget_values is not None else getattr(router, "budget_values", []))
+        self.budget_values = budget_values
+        self.register_buffer(
+            "budget_values_tensor",
+            torch.tensor(self.budget_values, dtype=torch.float32),
+            persistent=False,
+        )
+        if self.enable_policy_modulation and not self.budget_values:
+            raise ValueError("budget_values are required when policy-aware modulation is enabled")
+
+        self.policy_modulator = (
+            PolicyAwareModulator(
+                hidden_size=self.config.hidden_size,
+                d_choices=self.d_choices,
+                intermediate_size=self.default_d_keep,
+                embed_dim=self.policy_modulation_embed_dim,
+                hidden_dim=self.policy_modulation_hidden_dim,
+            )
+            if self.enable_policy_modulation
+            else None
+        )
         self.layers = nn.ModuleList(
             [ElasticQwen2DecoderLayer(layer, d_choices=self.d_choices) for layer in base_model.layers]
         )
@@ -108,6 +142,23 @@ class ElasticQwen2Model(nn.Module):
             raise ValueError(f"{name} must be [layers, choices] or [batch, layers, choices]")
         return value
 
+    def _collapse_budget_idx(self, budget_idx):
+        if budget_idx is None:
+            return None
+        if budget_idx.dim() == 0:
+            return budget_idx
+        if budget_idx.shape[0] == 1:
+            return budget_idx[0]
+        return budget_idx[0].clone()
+
+    def _budget_value_from_idx(self, budget_idx, device):
+        if budget_idx is None:
+            return None
+        if self.budget_values_tensor.numel() == 0:
+            raise ValueError("budget_values are unavailable for policy-aware modulation")
+        budget_values = self.budget_values_tensor.to(device=device)
+        return budget_values[int(budget_idx.item())]
+
     def _resolve_execution_controls(
         self,
         batch_size,
@@ -122,6 +173,8 @@ class ElasticQwen2Model(nn.Module):
         hard=False,
     ):
         budget_idx = self._normalize_budget_idx(budget_idx, batch_size, device)
+        if self.enable_policy_modulation and budget_idx is None:
+            raise ValueError("budget_idx is required when policy-aware modulation is enabled")
 
         if (
             layer_keep is None
@@ -162,7 +215,12 @@ class ElasticQwen2Model(nn.Module):
                 dtype=torch.long,
             )
 
+        collapsed_budget_idx = self._collapse_budget_idx(budget_idx)
         return {
+            "budget_idx": collapsed_budget_idx,
+            "budget_value": self._budget_value_from_idx(collapsed_budget_idx, device)
+            if self.enable_policy_modulation
+            else None,
             "layer_keep": self._collapse_batch_controls(layer_keep, "layer_keep"),
             "d_keep": self._collapse_batch_controls(d_keep, "d_keep"),
             "d_probs": self._collapse_batch_controls(d_probs, "d_probs"),
@@ -243,6 +301,8 @@ class ElasticQwen2Model(nn.Module):
                 "d_keep": int(controls["d_keep"][i].item()),
                 "layer_keep_prob": None if controls["layer_keep_probs"] is None else controls["layer_keep_probs"][i],
                 "d_probs": None if controls["d_probs"] is None else controls["d_probs"][i],
+                "budget_value": controls["budget_value"],
+                "policy_modulator": self.policy_modulator,
                 **kwargs,
             }
             if self.gradient_checkpointing and self.training:
@@ -268,10 +328,30 @@ class ElasticQwen2Model(nn.Module):
 
 
 class ElasticQwen2ForCausalLM(nn.Module):
-    def __init__(self, base_causallm, d_choices, router=None):
+    def __init__(
+        self,
+        base_causallm,
+        d_choices,
+        router=None,
+        budget_values=None,
+        enable_policy_modulation=False,
+        policy_modulation_embed_dim=16,
+        policy_modulation_hidden_dim=128,
+    ):
         super().__init__()
         self.config = base_causallm.config
-        self.model = ElasticQwen2Model(base_causallm.model, d_choices=d_choices, router=router)
+        self.enable_policy_modulation = bool(enable_policy_modulation)
+        self.policy_modulation_embed_dim = int(policy_modulation_embed_dim)
+        self.policy_modulation_hidden_dim = int(policy_modulation_hidden_dim)
+        self.model = ElasticQwen2Model(
+            base_causallm.model,
+            d_choices=d_choices,
+            router=router,
+            budget_values=budget_values,
+            enable_policy_modulation=self.enable_policy_modulation,
+            policy_modulation_embed_dim=self.policy_modulation_embed_dim,
+            policy_modulation_hidden_dim=self.policy_modulation_hidden_dim,
+        )
         self.vocab_size = base_causallm.vocab_size
         self.lm_head = base_causallm.lm_head
         self.loss_function = base_causallm.loss_function

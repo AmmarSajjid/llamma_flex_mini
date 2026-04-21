@@ -83,6 +83,9 @@ def parse_args():
     )
     parser.add_argument("--use-bf16", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--enable-policy-modulation", action="store_true")
+    parser.add_argument("--policy-modulation-embed-dim", type=int, default=16)
+    parser.add_argument("--policy-modulation-hidden-dim", type=int, default=128)
     parser.add_argument(
         "--d-choices",
         type=int,
@@ -249,6 +252,9 @@ def raise_or_checkpoint_non_finite(
                 "budget_values": list(args.budget_values),
                 "d_choices": list(args.d_choices),
                 "enable_layer_skip": args.enable_layer_skip,
+                "enable_policy_modulation": args.enable_policy_modulation,
+                "policy_modulation_embed_dim": args.policy_modulation_embed_dim,
+                "policy_modulation_hidden_dim": args.policy_modulation_hidden_dim,
                 "budget_accounting_mode": budget_accounting_mode,
                 "parameter_count_components": dict(parameter_count_components),
             },
@@ -323,6 +329,9 @@ def save_checkpoint(
             "use_bf16": args.use_bf16,
             "gradient_checkpointing": args.gradient_checkpointing,
             "enable_layer_skip": args.enable_layer_skip,
+            "enable_policy_modulation": args.enable_policy_modulation,
+            "policy_modulation_embed_dim": args.policy_modulation_embed_dim,
+            "policy_modulation_hidden_dim": args.policy_modulation_hidden_dim,
             "budget_accounting_mode": budget_accounting_mode,
             "parameter_count_components": dict(parameter_count_components),
             "logit_scale_start": args.logit_scale_start,
@@ -365,6 +374,7 @@ def main():
         accounting_mode=budget_accounting_mode,
     )
     print(f"Budget accounting mode: {budget_accounting_mode}")
+    print(f"Policy-aware modulation: {args.enable_policy_modulation}")
 
     router = BudgetRouter(
         budget_values=args.budget_values,
@@ -377,6 +387,10 @@ def main():
         base_causallm=trainable_base_model,
         d_choices=args.d_choices,
         router=router,
+        budget_values=args.budget_values,
+        enable_policy_modulation=args.enable_policy_modulation,
+        policy_modulation_embed_dim=args.policy_modulation_embed_dim,
+        policy_modulation_hidden_dim=args.policy_modulation_hidden_dim,
     ).to(DEVICE)
     configure_trainable_params(elastic_model, args.training_mode)
     if args.gradient_checkpointing:
@@ -466,6 +480,7 @@ def main():
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 labels=batch["labels"],
+                budget_idx=batch_budget_idx,
                 d_probs=sampled_router_out["d_probs"],
                 layer_keep_probs=sampled_router_out["layer_keep_probs"],
             )

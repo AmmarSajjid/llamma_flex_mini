@@ -84,6 +84,9 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
     d_choices = [int(choice) for choice in checkpoint["d_choices"]]
     budget_values = checkpoint["budget_values"]
     enable_layer_skip = checkpoint.get("enable_layer_skip", False)
+    enable_policy_modulation = checkpoint.get("enable_policy_modulation", False)
+    policy_modulation_embed_dim = int(checkpoint.get("policy_modulation_embed_dim", 16))
+    policy_modulation_hidden_dim = int(checkpoint.get("policy_modulation_hidden_dim", 128))
     budget_accounting_mode = checkpoint.get(
         "budget_accounting_mode",
         resolve_budget_accounting_mode(enable_layer_skip),
@@ -109,6 +112,9 @@ def load_router_from_checkpoint(checkpoint_path, model_config):
         d_choices,
         budget_values,
         enable_layer_skip,
+        enable_policy_modulation,
+        policy_modulation_embed_dim,
+        policy_modulation_hidden_dim,
         budget_accounting_mode,
         checkpoint_logit_scale,
     )
@@ -179,6 +185,7 @@ def evaluate_fixed_budget(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
+            budget_idx=budget_idx_tensor,
             d_keep=resolved["d_keep"],
             layer_keep=resolved["layer_keep"],
         )
@@ -334,6 +341,9 @@ def main():
         d_choices,
         checkpoint_budget_values,
         enable_layer_skip,
+        enable_policy_modulation,
+        policy_modulation_embed_dim,
+        policy_modulation_hidden_dim,
         budget_accounting_mode,
         checkpoint_logit_scale,
     ) = load_router_from_checkpoint(
@@ -355,6 +365,7 @@ def main():
     print(f"d_choices: {d_choices}")
     print(f"budgets: {budget_values}")
     print(f"budget_accounting_mode: {budget_accounting_mode}")
+    print(f"policy_aware_modulation: {enable_policy_modulation}")
     print(f"logit_scale(k): {logit_scale}")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     if tokenizer.pad_token is None:
@@ -371,6 +382,10 @@ def main():
         base_causallm=teacher_model,
         d_choices=d_choices,
         router=router,
+        budget_values=budget_values,
+        enable_policy_modulation=enable_policy_modulation,
+        policy_modulation_embed_dim=policy_modulation_embed_dim,
+        policy_modulation_hidden_dim=policy_modulation_hidden_dim,
     ).to(DEVICE)
     if checkpoint.get("elastic_model_state_dict") is not None:
         elastic_model.load_state_dict(checkpoint["elastic_model_state_dict"])

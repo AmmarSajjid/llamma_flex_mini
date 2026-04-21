@@ -26,6 +26,8 @@ class ElasticQwen2DecoderLayer(nn.Module):
         d_keep: int | None = None,
         layer_keep_prob: torch.Tensor | None = None,
         d_probs: torch.Tensor | None = None,
+        budget_value: torch.Tensor | None = None,
+        policy_modulator: nn.Module | None = None,
         **kwargs,
     ) -> torch.Tensor:
         if layer_keep_prob is None and not layer_keep:
@@ -52,6 +54,13 @@ class ElasticQwen2DecoderLayer(nn.Module):
             hidden_states = self.elastic_mlp.forward_soft(hidden_states, d_probs=d_probs)
         else:
             hidden_states = self.elastic_mlp(hidden_states, d_keep=d_keep)
+        if policy_modulator is not None:
+            hidden_states = policy_modulator(
+                hidden_states,
+                budget_value=budget_value,
+                d_keep=d_keep,
+                d_probs=d_probs,
+            )
         executed_states = residual + hidden_states
 
         if layer_keep_prob is None:
