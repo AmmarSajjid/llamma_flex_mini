@@ -83,6 +83,16 @@ class ElasticQwen2Model(nn.Module):
             budget_idx = budget_idx.expand(batch_size)
         return budget_idx
 
+    def _normalize_budget_value(self, budget_value, batch_size, device):
+        if budget_value is None:
+            return None
+        if not isinstance(budget_value, torch.Tensor):
+            budget_value = torch.tensor(budget_value, device=device, dtype=torch.float32)
+        budget_value = budget_value.to(device=device, dtype=torch.float32)
+        if budget_value.dim() == 0:
+            budget_value = budget_value.expand(batch_size)
+        return budget_value
+
     def _coerce_layer_controls(self, value, name, batch_size, dtype, device):
         if value is None:
             return None
@@ -151,6 +161,15 @@ class ElasticQwen2Model(nn.Module):
             return budget_idx[0]
         return budget_idx[0].clone()
 
+    def _collapse_budget_value(self, budget_value):
+        if budget_value is None:
+            return None
+        if budget_value.dim() == 0:
+            return budget_value
+        if budget_value.shape[0] == 1:
+            return budget_value[0]
+        return budget_value[0].clone()
+
     def _budget_value_from_idx(self, budget_idx, device):
         if budget_idx is None:
             return None
@@ -164,6 +183,7 @@ class ElasticQwen2Model(nn.Module):
         batch_size,
         device,
         budget_idx=None,
+        budget_value=None,
         layer_keep=None,
         d_keep=None,
         layer_keep_probs=None,
@@ -173,8 +193,9 @@ class ElasticQwen2Model(nn.Module):
         hard=False,
     ):
         budget_idx = self._normalize_budget_idx(budget_idx, batch_size, device)
-        if self.enable_policy_modulation and budget_idx is None:
-            raise ValueError("budget_idx is required when policy-aware modulation is enabled")
+        budget_value = self._normalize_budget_value(budget_value, batch_size, device)
+        if self.enable_policy_modulation and budget_idx is None and budget_value is None:
+            raise ValueError("budget_idx or budget_value is required when policy-aware modulation is enabled")
 
         if (
             layer_keep is None
@@ -182,9 +203,13 @@ class ElasticQwen2Model(nn.Module):
             and layer_keep_probs is None
             and d_probs is None
             and self.router is not None
-            and budget_idx is not None
+            and (budget_idx is not None or budget_value is not None)
         ):
-            router_out = self.router(budget_idx, device=device)
+            router_out = self.router(
+                budget_idx=budget_idx,
+                budget_value=budget_value,
+                device=device,
+            )
             sampled_out = sample_router_outputs_batch_shared(
                 router_out, tau=tau, hard=hard, logit_scale=logit_scale
             )
@@ -216,11 +241,12 @@ class ElasticQwen2Model(nn.Module):
             )
 
         collapsed_budget_idx = self._collapse_budget_idx(budget_idx)
+        collapsed_budget_value = self._collapse_budget_value(budget_value)
+        if collapsed_budget_value is None and self.enable_policy_modulation:
+            collapsed_budget_value = self._budget_value_from_idx(collapsed_budget_idx, device)
         return {
             "budget_idx": collapsed_budget_idx,
-            "budget_value": self._budget_value_from_idx(collapsed_budget_idx, device)
-            if self.enable_policy_modulation
-            else None,
+            "budget_value": collapsed_budget_value if self.enable_policy_modulation else None,
             "layer_keep": self._collapse_batch_controls(layer_keep, "layer_keep"),
             "d_keep": self._collapse_batch_controls(d_keep, "d_keep"),
             "d_probs": self._collapse_batch_controls(d_probs, "d_probs"),
@@ -236,6 +262,7 @@ class ElasticQwen2Model(nn.Module):
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
         budget_idx: torch.LongTensor | None = None,
+        budget_value: torch.Tensor | None = None,
         layer_keep: torch.Tensor | None = None,
         d_keep: torch.Tensor | None = None,
         layer_keep_probs: torch.Tensor | None = None,
@@ -281,6 +308,7 @@ class ElasticQwen2Model(nn.Module):
             batch_size=hidden_states.shape[0],
             device=hidden_states.device,
             budget_idx=budget_idx,
+            budget_value=budget_value,
             layer_keep=layer_keep,
             d_keep=d_keep,
             layer_keep_probs=layer_keep_probs,
@@ -367,6 +395,7 @@ class ElasticQwen2ForCausalLM(nn.Module):
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         budget_idx: torch.LongTensor | None = None,
+        budget_value: torch.Tensor | None = None,
         layer_keep: torch.Tensor | None = None,
         d_keep: torch.Tensor | None = None,
         layer_keep_probs: torch.Tensor | None = None,
@@ -384,6 +413,7 @@ class ElasticQwen2ForCausalLM(nn.Module):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             budget_idx=budget_idx,
+            budget_value=budget_value,
             layer_keep=layer_keep,
             d_keep=d_keep,
             layer_keep_probs=layer_keep_probs,

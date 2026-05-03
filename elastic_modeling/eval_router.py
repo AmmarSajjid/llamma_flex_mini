@@ -130,7 +130,6 @@ def evaluate_fixed_budget(
     router,
     tokenized_ds,
     tokenizer,
-    budget_idx,
     budget_value,
     d_choices,
     batch_size,
@@ -162,14 +161,14 @@ def evaluate_fixed_budget(
         batch = {k: v.to(DEVICE) for k, v in batch.items()}
         current_batch_size = batch["input_ids"].shape[0]
 
-        budget_idx_tensor = torch.full(
+        budget_value_tensor = torch.full(
             (current_batch_size,),
-            fill_value=budget_idx,
+            fill_value=budget_value,
             device=DEVICE,
-            dtype=torch.long,
+            dtype=torch.float32,
         )
 
-        router_out = router(budget_idx_tensor, device=DEVICE)
+        router_out = router(budget_value=budget_value_tensor, device=DEVICE)
         sampled_router_out = sample_router_outputs_batch_shared(
             router_out, tau=1.0, hard=True, logit_scale=logit_scale
         )
@@ -185,7 +184,7 @@ def evaluate_fixed_budget(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
-            budget_idx=budget_idx_tensor,
+            budget_value=budget_value_tensor,
             d_keep=resolved["d_keep"],
             layer_keep=resolved["layer_keep"],
         )
@@ -398,13 +397,12 @@ def main():
     )
 
     elastic_metrics = []
-    for budget_idx, budget_value in enumerate(budget_values):
+    for budget_value in budget_values:
         metrics = evaluate_fixed_budget(
             model=elastic_model,
             router=router,
             tokenized_ds=tokenized_ds,
             tokenizer=tokenizer,
-            budget_idx=budget_idx,
             budget_value=budget_value,
             d_choices=d_choices,
             batch_size=args.batch_size,
